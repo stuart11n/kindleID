@@ -1,0 +1,9 @@
+{
+  "lat": 0,
+  "lon": 0,
+  "place": "YOUR_CITY",
+  "solar_modbus": "SOLAREDGE_HOST:502",
+  "solar_unit": 1,
+  "pi_ssh": "USER@PI_HOST",
+  "kindle_server_url": "http://PI_HOST:8080"
+}

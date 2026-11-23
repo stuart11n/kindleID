@@ -1,0 +1,11 @@
+/kindle-shazam.exe
+/kindle-shazam
+/kindle-shazam-linux-armv6
+*.exe
+*~
+*.log
+server.out.log
+server.err.log
+/config.local.json
+/cmd/kindle-shazam/z_site_defaults.go
+/deploy/pi/kindle-extension-staged/

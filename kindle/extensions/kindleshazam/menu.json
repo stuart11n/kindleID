@@ -1,0 +1,29 @@
+{
+	"items": [
+		{
+			"name": "NP · Start",
+			"priority": 1,
+			"action": "bin/start.sh",
+			"exitmenu": true
+		},
+		{
+			"name": "NP · Stop",
+			"priority": 2,
+			"action": "bin/stop.sh",
+			"exitmenu": true
+		},
+		{
+			"name": "NP · Show server URL",
+			"priority": 3,
+			"action": "bin/show-url.sh",
+			"exitmenu": false
+		},
+		{
+			"name": "NP · Use Pi (from deploy)",
+			"priority": 4,
+			"action": "bin/set-server.sh",
+			"params": "http://PI_HOST:8080",
+			"exitmenu": false
+		}
+	]
+}

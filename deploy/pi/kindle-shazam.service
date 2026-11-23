@@ -1,0 +1,20 @@
+[Unit]
+Description=Kindle Shazam now-playing server
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kindle-shazam -device first -listen :8080
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/var/lib/kindle-shazam
+WorkingDirectory=/var/lib/kindle-shazam
+# ALSA USB mics often need the audio group
+SupplementaryGroups=audio
+# App logs stay in the in-memory /log buffer only.
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
