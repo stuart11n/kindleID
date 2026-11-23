@@ -273,7 +273,10 @@ func Run(ctx context.Context, opts Options) error {
 				clip := append([]float32(nil), act.Clip...)
 				gen := act.Generation
 				reason := act.Reason
-				go identifyClip(opts, machine, clip, gen, reason)
+				go identifyClip(opts, machine, clip, gen, reason, func() {
+					machine.ForgetTrack()
+					showIdle(true)
+				})
 			}
 		}
 	}
@@ -283,8 +286,8 @@ func fmtBattery(pct int) string {
 	return " batt " + strconv.Itoa(pct) + "%"
 }
 
-func identifyClip(opts Options, machine *detect.Machine, clip []float32, gen int, reason string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+func identifyClip(opts Options, machine *detect.Machine, clip []float32, gen int, reason string, clearStale func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	track, err := opts.Client.Identify(ctx, clip)
 	if err != nil {
@@ -295,14 +298,23 @@ func identifyClip(opts Options, machine *detect.Machine, clip []float32, gen int
 		return
 	}
 	if err != nil || track == nil {
+		if opts.Display != nil && opts.Display.Failures() != nil {
+			opts.Display.Failures().Add(clip, 16000, reason)
+		}
 		wait := machine.ScheduleMissRecheck()
 		log.Printf("shazam %s: no match; retry in %s", reason, wait.Round(time.Second))
+		// Don't leave the previous track on screen across a new song / hard miss streak.
+		// Clear wrong artwork on a new-track miss, or after a long miss streak.
+		if clearStale != nil && (reason == "start" || machine.MissFails() == 3 || machine.MissFails() == 8) {
+			log.Printf("clearing stale track after %s miss (%d)", reason, machine.MissFails())
+			clearStale()
+		}
 		return
 	}
 
 	clipDur := opts.Detect.Clip
 	if clipDur <= 0 {
-		clipDur = 10 * time.Second
+		clipDur = 30 * time.Second
 	}
 	wait := detect.NextRecheck(track.Duration, track.Offset, clipDur, opts.Detect.Recheck, 15*time.Second)
 	machine.ScheduleRecheck(wait)

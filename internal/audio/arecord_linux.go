@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"strings"
 	"sync"
@@ -26,7 +27,6 @@ func List() ([]Device, error) {
 		if !strings.HasPrefix(line, "card ") {
 			continue
 		}
-		// card 1: Device [USB Audio Device], device 0: USB Audio [USB Audio]
 		var card, dev int
 		var name string
 		if _, err := fmt.Sscanf(line, "card %d:", &card); err != nil {
@@ -61,8 +61,17 @@ func FormatDevices(devices []Device) string {
 	return out
 }
 
+func toHW(id string) string {
+	if strings.HasPrefix(id, "plughw:") {
+		return "hw:" + strings.TrimPrefix(id, "plughw:")
+	}
+	return id
+}
+
 // Open starts arecord on the selected device. match may be a name substring
 // or an ALSA id such as plughw:1,0.
+// Prefers native 48 kHz stereo on hw: (USB codecs), then resamples to 16 kHz
+// mono ourselves — plughw SRC is a common fingerprint killer vs phone Shazam.
 func Open(match string) (Stream, error) {
 	id := strings.TrimSpace(match)
 	name := id
@@ -78,32 +87,54 @@ func Open(match string) (Stream, error) {
 		id = dev.ID
 		name = dev.Name
 	}
-	cmd := exec.Command("arecord", "-D", id, "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw", "-q")
+
+	hw := toHW(id)
+	if s, err := startArecord(name+" @48k", hw, 48000, true); err == nil {
+		log.Printf("capture %s via %s 48k stereo→16k mono", name, hw)
+		return s, nil
+	} else {
+		log.Printf("capture 48k hw failed (%v); falling back to %s 16k", err, id)
+	}
+	s, err := startArecord(name, id, 16000, false)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("capture %s via %s 16k stereo→mono", name, id)
+	return s, nil
+}
+
+func startArecord(name, device string, rate int, decimate3 bool) (*arecordStream, error) {
+	cmd := exec.Command("arecord", "-D", device, "-f", "S16_LE", "-r", fmt.Sprintf("%d", rate), "-c", "2", "-t", "raw", "-q")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("arecord %s: %w", id, err)
+		return nil, fmt.Errorf("arecord %s: %w", device, err)
 	}
 	s := &arecordStream{
-		name:   name,
-		cmd:    cmd,
-		chunks: make(chan []float32, 32),
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		name:      name,
+		cmd:       cmd,
+		chunks:    make(chan []float32, 32),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
+		rate:      rate,
+		decimate3: decimate3,
 	}
 	go s.read(stdout)
 	return s, nil
 }
 
 type arecordStream struct {
-	name   string
-	cmd    *exec.Cmd
-	chunks chan []float32
-	stop   chan struct{}
-	done   chan struct{}
-	once   sync.Once
+	name      string
+	cmd       *exec.Cmd
+	chunks    chan []float32
+	stop      chan struct{}
+	done      chan struct{}
+	once      sync.Once
+	chLogged  sync.Once
+	rate      int
+	decimate3 bool
 }
 
 func (s *arecordStream) Name() string             { return s.name }
@@ -123,8 +154,13 @@ func (s *arecordStream) read(r io.Reader) {
 	defer close(s.chunks)
 	defer close(s.done)
 	defer s.cmd.Wait()
-	br := bufio.NewReaderSize(r, 4096)
-	raw := make([]byte, 1600*2) // 100 ms of s16le
+	br := bufio.NewReaderSize(r, 16384)
+	// 100 ms of stereo s16le at capture rate.
+	frames := s.rate / 10
+	if frames < 160 {
+		frames = 1600
+	}
+	raw := make([]byte, frames*2*2)
 	for {
 		select {
 		case <-s.stop:
@@ -134,15 +170,23 @@ func (s *arecordStream) read(r io.Reader) {
 		if _, err := io.ReadFull(br, raw); err != nil {
 			return
 		}
-		out := make([]float32, len(raw)/2)
-		for i := range out {
+		stereo := make([]float32, len(raw)/2)
+		for i := range stereo {
 			v := int16(binary.LittleEndian.Uint16(raw[i*2:]))
-			out[i] = float32(v) / 32768
+			stereo[i] = float32(v) / 32768
+		}
+		choice := ChannelChoice(stereo)
+		s.chLogged.Do(func() {
+			log.Printf("capture channel: %s (stereo→mono)", choice)
+		})
+		mono := StereoToMono(stereo)
+		if s.decimate3 {
+			mono = Decimate3(mono)
 		}
 		select {
 		case <-s.stop:
 			return
-		case s.chunks <- out:
+		case s.chunks <- mono:
 		}
 	}
 }

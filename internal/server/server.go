@@ -41,6 +41,7 @@ type Display struct {
 	device    string
 	meta      Meta
 	logs      *LogBuf
+	failures  *FailureStore
 }
 
 func NewDisplay(device string, threshold float64) *Display {
@@ -50,6 +51,7 @@ func NewDisplay(device string, threshold float64) *Display {
 		threshold: threshold,
 		version:   "0",
 		logs:      NewLogBuf(50),
+		failures:  NewFailureStore(),
 	}
 }
 
@@ -122,9 +124,11 @@ func (d *Display) snapshot() (png []byte, version string, status Status) {
 	return png, version, status
 }
 
-// Handler serves /version, /screen.png, /status, and /log.
+// Handler serves /version, /screen.png, /status, /log, and /match-failures.
 func (d *Display) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/match-failures", d.handleMatchFailures)
+	mux.HandleFunc("/match-failures/", d.handleMatchFailures)
 	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
 		_, version, _ := d.snapshot()
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")

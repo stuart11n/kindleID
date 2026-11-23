@@ -121,11 +121,17 @@ func TestMissRecheckBackoff(t *testing.T) {
 	if wait := m.ScheduleMissRecheck(); wait != 10*time.Second {
 		t.Fatalf("first miss wait %s, want 10s", wait)
 	}
-	if wait := m.ScheduleMissRecheck(); wait != time.Minute {
-		t.Fatalf("second miss wait %s, want 1m", wait)
+	if wait := m.ScheduleMissRecheck(); wait != 15*time.Second {
+		t.Fatalf("second miss wait %s, want 15s", wait)
 	}
-	if wait := m.ScheduleMissRecheck(); wait != time.Minute {
-		t.Fatalf("third miss wait %s, want 1m", wait)
+	for i := 0; i < 6; i++ {
+		if wait := m.ScheduleMissRecheck(); wait != 15*time.Second {
+			t.Fatalf("miss %d wait %s, want 15s", i+3, wait)
+		}
+	}
+	// missFails is now 8; next bumps to 9 → 30s
+	if wait := m.ScheduleMissRecheck(); wait != 30*time.Second {
+		t.Fatalf("later miss wait %s, want 30s", wait)
 	}
 	m.ScheduleRecheck(2 * time.Minute)
 	if wait := m.ScheduleMissRecheck(); wait != 10*time.Second {

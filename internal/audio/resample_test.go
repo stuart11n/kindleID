@@ -2,6 +2,14 @@ package audio
 
 import "testing"
 
+func TestDecimate3(t *testing.T) {
+	in := []float32{1, 2, 3, 4, 5, 6}
+	out := Decimate3(in)
+	if len(out) != 2 || out[0] != 2 || out[1] != 5 {
+		t.Fatalf("%v", out)
+	}
+}
+
 func TestResamplerRatio(t *testing.T) {
 	in := make([]float32, 48000)
 	for i := range in {

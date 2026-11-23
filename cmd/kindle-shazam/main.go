@@ -38,7 +38,7 @@ func main() {
 	height := flag.Int("height", 1072, "logical screen height (Paperwhite 7th gen landscape is 1072; portrait is 1448)")
 	threshold := flag.Float64("threshold", 0.005, "RMS below this counts as silence")
 	settle := flag.Duration("settle", 6*time.Second, "sound required before a new track is real")
-	clip := flag.Duration("clip", 10*time.Second, "audio sent to Shazam")
+	clip := flag.Duration("clip", 30*time.Second, "audio sent to Shazam")
 	gap := flag.Duration("gap", 2*time.Second, "silence that separates tracks")
 	silence := flag.Duration("silence", 20*time.Second, "silence before Nothing playing")
 	recheck := flag.Duration("recheck", time.Minute, "how often a playing record is checked again")

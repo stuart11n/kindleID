@@ -41,6 +41,20 @@ func (r *Resampler) Process(in []float32) []float32 {
 	return out
 }
 
+// Decimate3 downsamples 48 kHz → 16 kHz with a 3-tap box (cheap anti-alias).
+func Decimate3(in []float32) []float32 {
+	n := len(in) / 3
+	if n == 0 {
+		return nil
+	}
+	out := make([]float32, n)
+	for i := 0; i < n; i++ {
+		j := i * 3
+		out[i] = (in[j] + in[j+1] + in[j+2]) / 3
+	}
+	return out
+}
+
 // Mixdown averages interleaved channels into mono.
 func Mixdown(interleaved []float32, channels int) []float32 {
 	if channels <= 1 {

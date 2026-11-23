@@ -18,16 +18,10 @@ msg() {
 	fi
 }
 
-hide_chrome() {
-	lipc-set-prop com.lab126.pillow disableEnablePillow disable >/dev/null 2>&1
-	if [ -f /etc/upstart/statusbar.conf ]; then
-		stop statusbar >/dev/null 2>&1
-	fi
-}
-
 while true; do
-	hide_chrome
+	# Keep wifi/session alive; framework is already stopped by start.sh.
 	lipc-set-prop com.lab126.powerd -i deferSuspend 120000 >/dev/null 2>&1
+	lipc-set-prop com.lab126.powerd preventScreenSaver 1 >/dev/null 2>&1
 	base=$(tr -d '[:space:]' < "$EXT/server.url")
 	if [ -z "$base" ] || [ "$base" = "http://PI_HOST:8080" ]; then
 		msg "bad server.url"

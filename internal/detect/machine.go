@@ -70,7 +70,7 @@ func New(cfg Config) *Machine {
 		cfg.Settle = 6 * time.Second
 	}
 	if cfg.Clip <= 0 {
-		cfg.Clip = 10 * time.Second
+		cfg.Clip = 30 * time.Second
 	}
 	if cfg.Gap <= 0 {
 		cfg.Gap = 2 * time.Second
@@ -200,21 +200,38 @@ func (m *Machine) ScheduleRecheck(wait time.Duration) {
 	m.sinceRecheck = 0
 }
 
-// ScheduleMissRecheck backs off after a no-match: 10s first, then Recheck (60s).
+// ScheduleMissRecheck backs off after a no-match: 10s, then 15s for several
+// tries, then 30s — keep sampling hard albums instead of waiting a full minute.
 func (m *Machine) ScheduleMissRecheck() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.missFails++
-	wait := 10 * time.Second
-	if m.missFails > 1 {
-		wait = m.cfg.Recheck
-		if wait <= 0 {
-			wait = time.Minute
-		}
+	var wait time.Duration
+	switch {
+	case m.missFails <= 1:
+		wait = 10 * time.Second
+	case m.missFails <= 8:
+		wait = 15 * time.Second
+	default:
+		wait = 30 * time.Second
 	}
 	m.recheckN = samples(m.cfg.SampleRate, wait)
 	m.sinceRecheck = 0
 	return wait
+}
+
+// MissFails is consecutive no-matches since the last successful identify.
+func (m *Machine) MissFails() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.missFails
+}
+
+// ForgetTrack drops the "we know what's playing" flag after stale misses.
+func (m *Machine) ForgetTrack() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.haveTrack = false
 }
 
 // RecheckEvery reports the current recheck interval.

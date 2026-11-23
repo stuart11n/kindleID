@@ -44,18 +44,41 @@ func New() *Client {
 		shazam: goshazam.New(
 			goshazam.WithLanguage("en-US"),
 			goshazam.WithEndpointCountry("US"),
-			goshazam.WithTimeout(15*time.Second),
+			goshazam.WithTimeout(45*time.Second),
 		),
-		http: &http.Client{Timeout: 15 * time.Second},
+		http: &http.Client{Timeout: 45 * time.Second},
 	}
 }
 
-// Identify fingerprints about ten seconds of 16 kHz mono audio.
+// Identify fingerprints a mono 16 kHz clip (default ~30s).
 // A nil track and a nil error means Shazam had no match.
+// Line-in ADCs often clip; if the first attempt misses, retry at half gain.
 func (c *Client) Identify(ctx context.Context, samples []float32) (*Track, error) {
 	if len(samples) < 16000 {
 		return nil, fmt.Errorf("clip is only %d samples", len(samples))
 	}
+	peak, clipPct := peakStats(samples)
+	track, err := c.recognize(ctx, prepareClip(samples, peak, true))
+	if err != nil {
+		return nil, err
+	}
+	if track != nil {
+		return track, nil
+	}
+	// Hot line-in / soft clip wrecks fingerprints; phone mics AGC around this.
+	if clipPct >= 0.001 || peak >= 0.95 {
+		track, err = c.recognize(ctx, prepareClip(samples, peak, false))
+		if err != nil {
+			return nil, err
+		}
+		if track != nil {
+			return track, nil
+		}
+	}
+	return nil, nil
+}
+
+func (c *Client) recognize(ctx context.Context, samples []float32) (*Track, error) {
 	pcm := make([]int16, len(samples))
 	for i, v := range samples {
 		if v > 1 {
@@ -79,6 +102,55 @@ func (c *Client) Identify(ctx context.Context, samples []float32) (*Track, error
 		}
 	}
 	return track, nil
+}
+
+func peakStats(samples []float32) (peak float32, clipPct float64) {
+	if len(samples) == 0 {
+		return 0, 0
+	}
+	var clipped int
+	for _, v := range samples {
+		if v < 0 {
+			v = -v
+		}
+		if v > peak {
+			peak = v
+		}
+		if v >= 0.99 {
+			clipped++
+		}
+	}
+	return peak, float64(clipped) / float64(len(samples))
+}
+
+// prepareClip peak-normalizes quiet audio, or pulls hot/clipped audio down.
+func prepareClip(samples []float32, peak float32, boostQuiet bool) []float32 {
+	if len(samples) == 0 || peak < 1e-4 {
+		return samples
+	}
+	var g float32
+	switch {
+	case peak >= 0.95:
+		// Likely ADC clip — pull down before fingerprinting.
+		g = 0.7 / peak
+	case boostQuiet && peak < 0.85:
+		g = 0.85 / peak
+	case !boostQuiet:
+		g = 0.5
+	default:
+		return samples
+	}
+	out := make([]float32, len(samples))
+	for i, v := range samples {
+		x := v * g
+		if x > 1 {
+			x = 1
+		} else if x < -1 {
+			x = -1
+		}
+		out[i] = x
+	}
+	return out
 }
 
 func fromResponse(resp *models.ResponseTrack) *Track {
