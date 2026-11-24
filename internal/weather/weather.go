@@ -62,6 +62,18 @@ func New(opts Options) *Client {
 	return &Client{opts: opts, http: c}
 }
 
+// SetOptions updates location / unit for the next Fetch.
+func (c *Client) SetOptions(opts Options) {
+	if c == nil {
+		return
+	}
+	if opts.HTTP == nil {
+		opts.HTTP = c.http
+	}
+	c.opts = opts
+	c.http = opts.HTTP
+}
+
 // Resolve fills lat/lon/place from IP when coordinates were not set.
 func (c *Client) Resolve(ctx context.Context) error {
 	if c.opts.Lat != 0 || c.opts.Lon != 0 {

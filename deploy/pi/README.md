@@ -21,13 +21,20 @@ Lite 32-bit (Bookworm)** and a USB audio capture device.
   "solar_modbus": "SOLAREDGE_HOST:502",
   "solar_unit": 1,
   "pi_ssh": "USER@PI_HOST",
-  "kindle_server_url": "http://PI_HOST:8080"
+  "kindle_server_url": "http://PI_HOST:8080",
+  "identify": "both",
+  "audd_api_token": "YOUR_AUDD_API_TOKEN"
 }
 ```
 
-Site defaults are baked into the Pi binary at **deploy** time via `-ldflags`
-(from `config.local.json`). The Kindle `server.url` in git is the placeholder
-`http://PI_HOST:8080`; deploy writes the real URL onto a mounted Kindle.
+Site defaults (lat/lon/place/solar) are baked into the Pi binary at **deploy**
+time via `-ldflags`. The AudD token is **not** — deploy writes it to
+`/etc/kindle-shazam.env` (mode 600) from `audd_api_token`. Default identifier
+is `both` (AudD + Shazam race; first match wins; bottom-right shows failure
+rates `S n%  A n%`). Use `"identify": "audd"` or `"shazam"` for a single backend.
+
+The Kindle `server.url` in git is the placeholder `http://PI_HOST:8080`; deploy
+writes the real URL onto a mounted Kindle.
 
 ## OS image
 
@@ -48,7 +55,7 @@ powershell -File deploy/pi/deploy.ps1
 That script:
 
 1. Cross-compiles `linux/arm` `GOARM=6` with ldflags from `config.local.json`
-2. `scp`s the binary + unit to `pi_ssh`, installs, restarts `kindle-shazam`
+2. Installs binary, unit, and `/etc/kindle-shazam.env` (token + provider)
 3. If a Kindle volume is mounted, sets `extensions/kindleshazam/server.url`
    to `kindle_server_url`
 

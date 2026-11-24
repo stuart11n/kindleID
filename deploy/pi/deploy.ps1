@@ -53,12 +53,31 @@ $key = Join-Path $env:USERPROFILE '.ssh\id_ed25519'
 $sshArgs = @('-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=20')
 if (Test-Path $key) { $sshArgs = @('-i', $key) + $sshArgs }
 
-Write-Host "Deploying to $($cfg.pi_ssh)..."
-$svc = Join-Path $PSScriptRoot 'kindle-shazam.service'
-& scp @sshArgs $out $svc "$($cfg.pi_ssh):/tmp/"
-if ($LASTEXITCODE -ne 0) { throw 'scp failed' }
+$identify = 'audd'
+if ($cfg.identify) { $identify = [string]$cfg.identify }
+$auddToken = ''
+if ($cfg.audd_api_token) { $auddToken = [string]$cfg.audd_api_token }
+if ($identify -eq 'audd' -or $identify -eq 'aud' -or $identify -eq 'both' -or $identify -eq 'ab' -or $identify -eq 'race' -or $identify -eq '') {
+  if (-not $auddToken -or $auddToken -eq 'YOUR_AUDD_API_TOKEN') {
+    throw "config.local.json: set audd_api_token (AudD dashboard token) when identify is both/audd"
+  }
+}
 
-$remote = 'set -e; test -s /tmp/kindle-shazam-linux-armv6; sudo install -m 755 /tmp/kindle-shazam-linux-armv6 /usr/local/bin/kindle-shazam; sudo install -m 644 /tmp/kindle-shazam.service /etc/systemd/system/kindle-shazam.service; sudo mkdir -p /var/lib/kindle-shazam; sudo systemctl daemon-reload; sudo systemctl enable --now kindle-shazam; sudo systemctl restart kindle-shazam; sleep 5; systemctl is-active kindle-shazam; ls -la /usr/local/bin/kindle-shazam; curl -sS -m 15 http://127.0.0.1:8080/version; echo'
+# Secrets go in an env file on the Pi — never baked into the binary.
+$envLocal = Join-Path $PSScriptRoot 'kindle-shazam.env'
+$envBody = @"
+IDENTIFY_PROVIDER=$identify
+AUDD_API_TOKEN=$auddToken
+"@
+[System.IO.File]::WriteAllText($envLocal, ($envBody -replace "`r`n", "`n"))
+
+Write-Host "Deploying to $($cfg.pi_ssh) (identify=$identify)..."
+$svc = Join-Path $PSScriptRoot 'kindle-shazam.service'
+& scp @sshArgs $out $svc $envLocal "$($cfg.pi_ssh):/tmp/"
+if ($LASTEXITCODE -ne 0) { throw 'scp failed' }
+Remove-Item -Force $envLocal -ErrorAction SilentlyContinue
+
+$remote = 'set -e; test -s /tmp/kindle-shazam-linux-armv6; sudo install -m 755 /tmp/kindle-shazam-linux-armv6 /usr/local/bin/kindle-shazam; sudo install -m 644 /tmp/kindle-shazam.service /etc/systemd/system/kindle-shazam.service; sudo install -m 600 /tmp/kindle-shazam.env /etc/kindle-shazam.env; sudo rm -f /tmp/kindle-shazam.env; sudo mkdir -p /var/lib/kindle-shazam; sudo systemctl daemon-reload; sudo systemctl enable --now kindle-shazam; sudo systemctl restart kindle-shazam; sleep 5; systemctl is-active kindle-shazam; ls -la /usr/local/bin/kindle-shazam; curl -sS -m 15 http://127.0.0.1:8080/version; echo; curl -sS -m 5 "http://127.0.0.1:8080/log?follow=0" | head -n 8'
 & ssh @sshArgs $cfg.pi_ssh $remote
 if ($LASTEXITCODE -ne 0) { throw 'remote install failed' }
 

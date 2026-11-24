@@ -5,5 +5,7 @@
   "solar_modbus": "SOLAREDGE_HOST:502",
   "solar_unit": 1,
   "pi_ssh": "USER@PI_HOST",
-  "kindle_server_url": "http://PI_HOST:8080"
+  "kindle_server_url": "http://PI_HOST:8080",
+  "identify": "both",
+  "audd_api_token": "YOUR_AUDD_API_TOKEN"
 }

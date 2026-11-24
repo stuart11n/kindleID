@@ -11,6 +11,8 @@ func testConfig() Config {
 		Threshold:  0.02,
 		Settle:     6 * time.Second,
 		Clip:       10 * time.Second,
+		MissWait:   20 * time.Second,
+		FullClip:   30 * time.Second,
 		Gap:        2 * time.Second,
 		Silence:    20 * time.Second,
 		Recheck:    time.Minute,
@@ -99,7 +101,6 @@ func TestSilenceShowsNothingOnce(t *testing.T) {
 	if late := m.Finish(act.Generation, false); late {
 		t.Fatal("stale generation was accepted")
 	}
-	// The nothing event bumps the generation, so the in-flight id is stale.
 	if again := m.Push(tone(5000, 0)); again.ShowNothing {
 		t.Fatal("nothing playing repeated")
 	}
@@ -116,25 +117,39 @@ func TestFailedIdentifyDoesNotClearScreen(t *testing.T) {
 	}
 }
 
-func TestMissRecheckBackoff(t *testing.T) {
+func TestMissWaitsThenSendsFullRecording(t *testing.T) {
 	m := New(testConfig())
-	if wait := m.ScheduleMissRecheck(); wait != 10*time.Second {
-		t.Fatalf("first miss wait %s, want 10s", wait)
+	act := m.Push(tone(10000, 0.2))
+	if !act.Identify || act.Reason != "start" || len(act.Clip) != 10000 {
+		t.Fatalf("start = %+v len=%d", act, len(act.Clip))
 	}
-	if wait := m.ScheduleMissRecheck(); wait != 15*time.Second {
-		t.Fatalf("second miss wait %s, want 15s", wait)
+	m.Finish(act.Generation, false)
+	if wait := m.ScheduleMissRecheck(); wait != 20*time.Second {
+		t.Fatalf("miss wait %s, want 20s", wait)
 	}
-	for i := 0; i < 6; i++ {
-		if wait := m.ScheduleMissRecheck(); wait != 15*time.Second {
-			t.Fatalf("miss %d wait %s, want 15s", i+3, wait)
+	// Keep recording during the wait; ring holds FullClip = 30s.
+	if act := m.Push(tone(19000, 0.2)); act.Identify {
+		t.Fatal("full submit early")
+	}
+	act = m.Push(tone(1000, 0.2))
+	if !act.Identify || act.Reason != "full" {
+		t.Fatalf("full = %+v", act)
+	}
+	// Ring caps at 30s (10s start + 20s more).
+	if len(act.Clip) < 29000 || len(act.Clip) > 30000 {
+		t.Fatalf("full clip len %d, want ~30000", len(act.Clip))
+	}
+}
+
+func TestMissRecheckAlwaysTwenty(t *testing.T) {
+	m := New(testConfig())
+	for i := 0; i < 3; i++ {
+		if wait := m.ScheduleMissRecheck(); wait != 20*time.Second {
+			t.Fatalf("miss %d wait %s, want 20s", i+1, wait)
 		}
 	}
-	// missFails is now 8; next bumps to 9 → 30s
-	if wait := m.ScheduleMissRecheck(); wait != 30*time.Second {
-		t.Fatalf("later miss wait %s, want 30s", wait)
-	}
 	m.ScheduleRecheck(2 * time.Minute)
-	if wait := m.ScheduleMissRecheck(); wait != 10*time.Second {
-		t.Fatalf("after match wait %s, want 10s", wait)
+	if wait := m.ScheduleMissRecheck(); wait != 20*time.Second {
+		t.Fatalf("after match wait %s, want 20s", wait)
 	}
 }

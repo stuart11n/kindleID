@@ -21,6 +21,7 @@ type Idle struct {
 	Solar         *solaredge.Snapshot
 	Satellite     image.Image
 	ShowSatellite bool
+	Footer        string // identify A/B rates, bottom-right
 }
 
 func (idle Idle) hasRightPanel() bool {
@@ -33,10 +34,10 @@ func (idle Idle) hasRightPanel() bool {
 // IdlePNG draws weather, and SolarEdge stats when present.
 func IdlePNG(width, height int, idle Idle) ([]byte, error) {
 	if idle.Weather != nil && !idle.hasRightPanel() {
-		return WeatherPNG(width, height, *idle.Weather)
+		return weatherPNG(width, height, *idle.Weather, idle.Footer)
 	}
 	if idle.Weather == nil && !idle.hasRightPanel() {
-		return PNG(width, height, Card{})
+		return PNG(width, height, Card{Footer: idle.Footer})
 	}
 	if width < 64 || height < 64 {
 		return nil, errSize
@@ -53,9 +54,11 @@ func IdlePNG(width, height int, idle Idle) ([]byte, error) {
 	}
 	if width > height {
 		drawIdleLandscape(img, idle, pad, scale)
+		drawFooter(img, scale, idle.Footer)
 		img = SoftRotateCCW(img)
 	} else {
 		drawIdlePortrait(img, idle, pad, scale)
+		drawFooter(img, scale, idle.Footer)
 	}
 	return encode(img)
 }
@@ -307,14 +310,14 @@ func formatClock(t time.Time) string {
 }
 
 // Sunrise / sunset icons follow the classic half-sun-on-horizon mark:
-// filled semicircle for sunrise, outline for sunset, seven upper rays,
+// outline semicircle for sunrise, filled for sunset, seven upper rays,
 // horizon line, and two short reflection strokes below.
 func drawSunriseIcon(img *image.Gray, x, y, size int) {
-	drawHorizonSun(img, x, y, size, true)
+	drawHorizonSun(img, x, y, size, false)
 }
 
 func drawSunsetIcon(img *image.Gray, x, y, size int) {
-	drawHorizonSun(img, x, y, size, false)
+	drawHorizonSun(img, x, y, size, true)
 }
 
 func drawHorizonSun(img *image.Gray, x, y, size int, filled bool) {

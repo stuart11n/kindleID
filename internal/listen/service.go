@@ -20,12 +20,12 @@ import (
 
 // Options is the listener's runtime configuration.
 type Options struct {
-	Device    string
-	Display   *server.Display
-	Detect    detect.Config
-	Width     int
-	Height    int
-	Client    *identify.Client
+	Device           string
+	Display          *server.Display
+	Detect           detect.Config
+	Width            int
+	Height           int
+	Client           *identify.Client
 	Weather          *weather.Client
 	SolarEdge        solaredge.Source
 	Refresh          time.Duration
@@ -33,6 +33,46 @@ type Options struct {
 	SatelliteRefresh time.Duration
 	PanelCycle       time.Duration
 	Radar            bool // cycle right panel with radar map when true
+	Settings         *server.Settings
+}
+
+// live holds settings that /settings can change without restarting capture.
+type live struct {
+	mu           sync.RWMutex
+	client       *identify.Client
+	detect       detect.Config
+	width        int
+	height       int
+	refresh      time.Duration
+	solarRefresh time.Duration
+	radar        bool
+}
+
+func (l *live) clientOr(fallback *identify.Client) *identify.Client {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.client != nil {
+		return l.client
+	}
+	return fallback
+}
+
+func (l *live) size() (int, int) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.width, l.height
+}
+
+func (l *live) detectCfg() detect.Config {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.detect
+}
+
+func (l *live) flags() (refresh, solar time.Duration, radar bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.refresh, l.solarRefresh, l.radar
 }
 
 // Run captures audio until ctx is cancelled.
@@ -44,7 +84,7 @@ func Run(ctx context.Context, opts Options) error {
 	defer stream.Close()
 
 	if opts.Client == nil {
-		opts.Client = identify.New()
+		return errors.New("listen: identify client is required")
 	}
 	if opts.Refresh <= 0 {
 		opts.Refresh = 15 * time.Minute
@@ -52,17 +92,25 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.SolarRefresh <= 0 {
 		opts.SolarRefresh = time.Minute
 	}
-	if opts.Radar {
-		if opts.SatelliteRefresh <= 0 {
-			opts.SatelliteRefresh = 10 * time.Minute
-		}
-		if opts.PanelCycle <= 0 {
-			opts.PanelCycle = 5 * time.Second
-		}
+	if opts.SatelliteRefresh <= 0 {
+		opts.SatelliteRefresh = 10 * time.Minute
+	}
+	if opts.PanelCycle <= 0 {
+		opts.PanelCycle = 5 * time.Second
 	}
 	machine := detect.New(opts.Detect)
 	log.Printf("capture %s at %d Hz", stream.Name(), stream.SampleRate())
 	opts.Display.SetDevice(stream.Name())
+
+	lv := &live{
+		client:       opts.Client,
+		detect:       opts.Detect,
+		width:        opts.Width,
+		height:       opts.Height,
+		refresh:      opts.Refresh,
+		solarRefresh: opts.SolarRefresh,
+		radar:        opts.Radar,
+	}
 
 	var mu sync.Mutex
 	var wx weather.Snapshot
@@ -73,10 +121,12 @@ func Run(ctx context.Context, opts Options) error {
 	var showSat bool
 
 	showIdle := func(force bool) {
+		w, h := lv.size()
+		_, _, radar := lv.flags()
 		mu.Lock()
 		idle := render.Idle{
 			Satellite:     sat,
-			ShowSatellite: showSat && sat != nil,
+			ShowSatellite: radar && showSat && sat != nil,
 		}
 		if haveWX {
 			s := wx
@@ -88,7 +138,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		mu.Unlock()
 
-		png, err := render.IdlePNG(opts.Width, opts.Height, idle)
+		png, err := render.IdlePNG(w, h, idle)
 		if err != nil {
 			log.Printf("render idle: %v", err)
 			return
@@ -110,6 +160,30 @@ func Run(ctx context.Context, opts Options) error {
 			default:
 				log.Printf("screen: Nothing playing.")
 			}
+		}
+	}
+
+	paintTrack := func(card render.Card, meta server.Meta, quiet bool) {
+		w, h := lv.size()
+		png, err := render.PNG(w, h, card)
+		if err != nil {
+			log.Printf("render: %v", err)
+			return
+		}
+		if !opts.Display.Set(png, meta) {
+			return
+		}
+		if quiet {
+			return
+		}
+		if card.Art != nil {
+			log.Printf("screen: %s — %s (+art)", meta.Artist, meta.Title)
+			return
+		}
+		if meta.Year != "" {
+			log.Printf("screen: %s — %s (%s · %s)", meta.Artist, meta.Title, meta.Album, meta.Year)
+		} else {
+			log.Printf("screen: %s — %s (%s)", meta.Artist, meta.Title, meta.Album)
 		}
 	}
 
@@ -155,7 +229,8 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	refreshSatellite := func() {
-		if !opts.Radar || opts.Weather == nil {
+		_, _, radarOn := lv.flags()
+		if !radarOn || opts.Weather == nil {
 			return
 		}
 		sctx, cancel := context.WithTimeout(ctx, 45*time.Second)
@@ -172,6 +247,66 @@ func Run(ctx context.Context, opts Options) error {
 		if opts.Display.Idle() {
 			showIdle(false)
 		}
+	}
+
+	if opts.Settings != nil {
+		opts.Settings.OnApply(func(v server.SettingsValues) error {
+			cfg := detect.Config{
+				SampleRate: 16000,
+				Threshold:  v.Threshold,
+				Settle:     server.MustDuration(v.Settle, 2*time.Second),
+				Clip:       server.MustDuration(v.Clip, 5*time.Second),
+				MissWait:   server.MustDuration(v.MissWait, 20*time.Second),
+				FullClip:   server.MustDuration(v.FullClip, 30*time.Second),
+				Gap:        server.MustDuration(v.Gap, 500*time.Millisecond),
+				Silence:    server.MustDuration(v.Silence, 20*time.Second),
+				Recheck:    server.MustDuration(v.Recheck, time.Minute),
+			}
+			machine.SetConfig(cfg)
+			client, err := identify.New(identify.Options{
+				Provider:  v.Identify,
+				AudDToken: v.AudDToken,
+			})
+			if err != nil {
+				return err
+			}
+			if opts.Weather != nil {
+				opts.Weather.SetOptions(weather.Options{
+					Lat:     v.Lat,
+					Lon:     v.Lon,
+					Place:   v.Place,
+					Celsius: v.Celsius,
+				})
+			}
+			lv.mu.Lock()
+			lv.client = client
+			lv.detect = cfg
+			lv.width = v.Width
+			lv.height = v.Height
+			lv.refresh = server.MustDuration(v.WeatherEvery, 15*time.Minute)
+			lv.solarRefresh = server.MustDuration(v.SolarEvery, time.Minute)
+			lv.radar = v.Radar
+			lv.mu.Unlock()
+			opts.Display.Observe(machine.State(), machine.RMS())
+
+			// Patch the cached idle snapshot and redraw now (don't wait for next fetch).
+			mu.Lock()
+			if haveWX {
+				wx.Place = v.Place
+				if v.Celsius {
+					wx.Unit = "°C"
+				} else {
+					wx.Unit = "°F"
+				}
+			}
+			mu.Unlock()
+			if opts.Display.Idle() {
+				showIdle(true)
+			}
+			go func() { _ = refreshWeather() }()
+			log.Printf("settings applied (identify %s, place %q)", client.Name(), v.Place)
+			return nil
+		})
 	}
 
 	// Weather on a Pi 1 can miss the first TLS attempt; retry before giving up
@@ -250,7 +385,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}()
 
-	var sinceLog int
+	var lastState string
 	for {
 		select {
 		case <-ctx.Done():
@@ -260,11 +395,11 @@ func Run(ctx context.Context, opts Options) error {
 				return errors.New("audio stream closed")
 			}
 			act := machine.Push(chunk)
-			opts.Display.Observe(machine.State(), machine.RMS())
-			sinceLog += len(chunk)
-			if sinceLog >= stream.SampleRate()*2 {
-				sinceLog = 0
-				log.Printf("%s rms=%.4f threshold=%.4f", machine.State(), machine.RMS(), opts.Detect.Threshold)
+			state := machine.State()
+			opts.Display.Observe(state, machine.RMS())
+			if state != lastState {
+				lastState = state
+				log.Printf("%s rms=%.4f threshold=%.4f", state, machine.RMS(), lv.detectCfg().Threshold)
 			}
 			if act.ShowNothing {
 				showIdle(false)
@@ -273,7 +408,7 @@ func Run(ctx context.Context, opts Options) error {
 				clip := append([]float32(nil), act.Clip...)
 				gen := act.Generation
 				reason := act.Reason
-				go identifyClip(opts, machine, clip, gen, reason, func() {
+				go identifyClip(lv, opts, machine, clip, gen, reason, paintTrack, func() {
 					machine.ForgetTrack()
 					showIdle(true)
 				})
@@ -286,12 +421,14 @@ func fmtBattery(pct int) string {
 	return " batt " + strconv.Itoa(pct) + "%"
 }
 
-func identifyClip(opts Options, machine *detect.Machine, clip []float32, gen int, reason string, clearStale func()) {
+func identifyClip(lv *live, opts Options, machine *detect.Machine, clip []float32, gen int, reason string, paint func(render.Card, server.Meta, bool), clearStale func()) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	track, err := opts.Client.Identify(ctx, clip)
+	client := lv.clientOr(opts.Client)
+	det := lv.detectCfg()
+	track, err := client.Identify(ctx, clip)
 	if err != nil {
-		log.Printf("shazam %s: %v", reason, err)
+		log.Printf("identify %s: %v", reason, err)
 	}
 	if !machine.Finish(gen, err == nil && track != nil) {
 		log.Printf("dropped stale %s result", reason)
@@ -302,7 +439,7 @@ func identifyClip(opts Options, machine *detect.Machine, clip []float32, gen int
 			opts.Display.Failures().Add(clip, 16000, reason)
 		}
 		wait := machine.ScheduleMissRecheck()
-		log.Printf("shazam %s: no match; retry in %s", reason, wait.Round(time.Second))
+		log.Printf("identify %s: no match; retry in %s", reason, wait.Round(time.Second))
 		// Don't leave the previous track on screen across a new song / hard miss streak.
 		// Clear wrong artwork on a new-track miss, or after a long miss streak.
 		if clearStale != nil && (reason == "start" || machine.MissFails() == 3 || machine.MissFails() == 8) {
@@ -312,50 +449,71 @@ func identifyClip(opts Options, machine *detect.Machine, clip []float32, gen int
 		return
 	}
 
-	clipDur := opts.Detect.Clip
-	if clipDur <= 0 {
-		clipDur = 30 * time.Second
+	clipDur := det.Clip
+	if reason == "full" {
+		clipDur = time.Duration(len(clip)) * time.Second / 16000
 	}
-	wait := detect.NextRecheck(track.Duration, track.Offset, clipDur, opts.Detect.Recheck, 15*time.Second)
+	if clipDur <= 0 {
+		clipDur = 10 * time.Second
+	}
+	wait := detect.NextRecheck(track.Duration, track.Offset, clipDur, det.Recheck, 15*time.Second)
 	machine.ScheduleRecheck(wait)
+	via := track.Provider
+	if via == "" {
+		via = client.Name()
+	}
 	if track.Duration > 0 {
-		log.Printf("recheck in %s (track %s, offset %s)", wait.Round(time.Second), track.Duration.Round(time.Second), track.Offset.Round(time.Second))
+		log.Printf("recheck in %s via %s (track %s, offset %s)", wait.Round(time.Second), via, track.Duration.Round(time.Second), track.Offset.Round(time.Second))
 	} else {
-		log.Printf("recheck in %s (no duration)", wait.Round(time.Second))
+		log.Printf("recheck in %s via %s (no duration)", wait.Round(time.Second), via)
 	}
 
 	if opts.Display.SameTrack(track.Key) {
 		log.Printf("still %s — %s", track.Artist, track.Title)
 		return
 	}
-	var art image.Image
-	if img, err := opts.Client.DownloadArt(ctx, track.ArtURL); err != nil {
-		log.Printf("cover art: %v", err)
-	} else {
-		art = img
-	}
-	png, err := render.PNG(opts.Width, opts.Height, render.Card{
-		Title:  track.Title,
-		Artist: track.Artist,
-		Album:  track.Album,
-		Year:   track.Year,
-		Art:    art,
-	})
-	if err != nil {
-		log.Printf("render: %v", err)
-		return
-	}
-	if opts.Display.Set(png, server.Meta{
+	meta := server.Meta{
 		Key:    track.Key,
 		Title:  track.Title,
 		Artist: track.Artist,
 		Album:  track.Album,
 		Year:   track.Year,
-	}) {
-		if track.Year != "" {
-			log.Printf("screen: %s — %s (%s · %s)", track.Artist, track.Title, track.Album, track.Year)
-		} else {
-			log.Printf("screen: %s — %s (%s)", track.Artist, track.Title, track.Album)
-		}
 	}
+	card := render.Card{
+		Title:  track.Title,
+		Artist: track.Artist,
+		Album:  track.Album,
+		Year:   track.Year,
+	}
+	if paint == nil {
+		return
+	}
+	// Reuse cover from the 50 MiB FIFO cache (album and/or art URL keys).
+	if art := opts.Display.CoverArt(track.Artist, track.Album, track.ArtURL); art != nil {
+		log.Printf("cover art: cache hit (%s / %s)", track.Artist, track.Album)
+		card.Art = art
+		paint(card, meta, false)
+		return
+	}
+	paint(card, meta, false)
+	if track.ArtURL == "" {
+		log.Printf("cover art: no url for %s / %s", track.Artist, track.Album)
+		return
+	}
+	log.Printf("cover art: cache miss; fetching")
+	img, err := client.DownloadArt(ctx, track.ArtURL)
+	if err != nil {
+		log.Printf("cover art: %v", err)
+		return
+	}
+	if img == nil {
+		return
+	}
+	// Cache even if the screen moved on — next track on this album can reuse it.
+	opts.Display.RememberCover(track.Artist, track.Album, track.ArtURL, img)
+	if !opts.Display.SameTrack(track.Key) {
+		return
+	}
+	card.Art = img
+	paint(card, meta, false)
 }

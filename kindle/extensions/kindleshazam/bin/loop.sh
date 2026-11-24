@@ -1,21 +1,30 @@
 #!/bin/sh
 EXT="/mnt/us/extensions/kindleshazam"
 STATE="/var/tmp/kindleshazam"
+PIDFILE="/var/tmp/kindleshazam.pid"
 FBINK="/mnt/us/libkh/bin/fbink"
 if [ ! -x "$FBINK" ]; then
 	FBINK="fbink"
 fi
+# shellcheck source=chrome.sh
+. "$EXT/bin/chrome.sh"
 mkdir -p "$STATE"
 last=""
+last_fl=""
 n=0
 fail=0
+interval=10
 
 msg() {
-	if [ -x "$FBINK" ] || command -v "$FBINK" >/dev/null 2>&1; then
-		"$FBINK" -q -y 10 -x 1 "$1"
-	else
-		eips 1 10 "$1"
-	fi
+	np_msg "$1"
+}
+
+restore_and_exit() {
+	echo "$(date) remote stop — restoring UI" >>"$EXT/loop.log"
+	np_msg "restoring Kindle UI..."
+	np_start_framework
+	rm -f "$PIDFILE"
+	exit 0
 }
 
 while true; do
@@ -31,7 +40,32 @@ while true; do
 	fi
 	if wget -q -O "$STATE/version.new" "$base/version"; then
 		fail=0
-		ver=$(tr -d '[:space:]' < "$STATE/version.new")
+		ver=$(sed -n '1p' "$STATE/version.new" | tr -d '[:space:]')
+		next=$(sed -n '2p' "$STATE/version.new" | tr -d '[:space:]')
+		fl=$(sed -n '3p' "$STATE/version.new" | tr -d '[:space:]')
+		cmd=$(sed -n '4p' "$STATE/version.new" | tr -d '[:space:]')
+		if [ "$cmd" = "stop" ]; then
+			restore_and_exit
+		fi
+		case "$next" in
+			2|10) interval=$next ;;
+			*) interval=10 ;;
+		esac
+		# Apply frontlight when server requests a level (0–24).
+		case "$fl" in
+			''|'-') ;;
+			*[!0-9]*) ;;
+			*)
+				if [ "$fl" -ge 0 ] 2>/dev/null && [ "$fl" -le 24 ] 2>/dev/null; then
+					if [ "$fl" != "$last_fl" ]; then
+						if lipc-set-prop -i com.lab126.powerd flIntensity "$fl" >/dev/null 2>&1; then
+							last_fl="$fl"
+							echo "$(date) frontlight $fl" >>"$EXT/loop.log"
+						fi
+					fi
+				fi
+				;;
+		esac
 		if [ -n "$ver" ] && [ "$ver" != "$last" ]; then
 			if wget -q -O "$STATE/screen.png" "$base/screen.png"; then
 				n=$((n + 1))
@@ -54,6 +88,7 @@ while true; do
 		if [ "$fail" -le 3 ] || [ $((fail % 6)) -eq 0 ]; then
 			msg "no server: $base"
 		fi
+		interval=10
 	fi
-	sleep 10
+	sleep "$interval"
 done

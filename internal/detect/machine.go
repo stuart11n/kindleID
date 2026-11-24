@@ -11,7 +11,9 @@ type Config struct {
 	SampleRate int
 	Threshold  float64
 	Settle     time.Duration
-	Clip       time.Duration
+	Clip       time.Duration // first submit after this much sound (also clip length)
+	MissWait   time.Duration // after a miss, keep recording this long then send the whole buffer
+	FullClip   time.Duration // ring capacity; default Clip+MissWait
 	Gap        time.Duration
 	Silence    time.Duration
 	Recheck    time.Duration
@@ -35,9 +37,9 @@ const (
 )
 
 // Machine turns a mono stream into identify requests.
-// A needle drop or the gap between tracks starts a new identification after
-// Settle of sound, using Clip of audio. While a record plays, it asks again
-// every Recheck. Silence for Silence shows "Nothing playing."
+// After Settle of sound it submits Clip seconds, keeps buffering, and on a
+// miss waits MissWait then submits the whole ring. While a record plays it
+// asks again every Recheck. Silence for Silence shows "Nothing playing."
 type Machine struct {
 	cfg          Config
 	settleN      int
@@ -51,6 +53,7 @@ type Machine struct {
 	soundRun     int
 	sinceRecheck int
 	missFails    int // consecutive no-matches while still playing
+	wantFull     bool
 	inFlight     bool
 	haveTrack    bool
 	nothingShown bool
@@ -67,19 +70,29 @@ func New(cfg Config) *Machine {
 		cfg.Threshold = 0.02
 	}
 	if cfg.Settle <= 0 {
-		cfg.Settle = 6 * time.Second
+		cfg.Settle = 2 * time.Second
 	}
 	if cfg.Clip <= 0 {
-		cfg.Clip = 30 * time.Second
+		cfg.Clip = 5 * time.Second
+	}
+	if cfg.MissWait <= 0 {
+		cfg.MissWait = 20 * time.Second
 	}
 	if cfg.Gap <= 0 {
-		cfg.Gap = 2 * time.Second
+		cfg.Gap = 500 * time.Millisecond
 	}
 	if cfg.Silence <= 0 {
 		cfg.Silence = 20 * time.Second
 	}
 	if cfg.Recheck <= 0 {
 		cfg.Recheck = time.Minute
+	}
+	if cfg.FullClip <= 0 {
+		cfg.FullClip = 30 * time.Second
+	}
+	ringDur := cfg.FullClip
+	if min := cfg.Clip + cfg.MissWait; min > ringDur {
+		ringDur = min
 	}
 	return &Machine{
 		cfg:      cfg,
@@ -88,7 +101,7 @@ func New(cfg Config) *Machine {
 		gapN:     samples(cfg.SampleRate, cfg.Gap),
 		silenceN: samples(cfg.SampleRate, cfg.Silence),
 		recheckN: samples(cfg.SampleRate, cfg.Recheck),
-		ring:     newRing(samples(cfg.SampleRate, cfg.Clip)),
+		ring:     newRing(samples(cfg.SampleRate, ringDur)),
 	}
 }
 
@@ -98,6 +111,56 @@ func samples(rate int, d time.Duration) int {
 		return 1
 	}
 	return n
+}
+
+// SetConfig updates timings live. Ring grows if FullClip increases; it does not shrink.
+func (m *Machine) SetConfig(cfg Config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if cfg.SampleRate <= 0 {
+		cfg.SampleRate = m.cfg.SampleRate
+	}
+	if cfg.SampleRate <= 0 {
+		cfg.SampleRate = 16000
+	}
+	if cfg.Threshold <= 0 {
+		cfg.Threshold = m.cfg.Threshold
+	}
+	if cfg.Settle <= 0 {
+		cfg.Settle = m.cfg.Settle
+	}
+	if cfg.Clip <= 0 {
+		cfg.Clip = m.cfg.Clip
+	}
+	if cfg.MissWait <= 0 {
+		cfg.MissWait = m.cfg.MissWait
+	}
+	if cfg.Gap <= 0 {
+		cfg.Gap = m.cfg.Gap
+	}
+	if cfg.Silence <= 0 {
+		cfg.Silence = m.cfg.Silence
+	}
+	if cfg.Recheck <= 0 {
+		cfg.Recheck = m.cfg.Recheck
+	}
+	if cfg.FullClip <= 0 {
+		cfg.FullClip = m.cfg.FullClip
+	}
+	ringDur := cfg.FullClip
+	if min := cfg.Clip + cfg.MissWait; min > ringDur {
+		ringDur = min
+	}
+	need := samples(cfg.SampleRate, ringDur)
+	if m.ring == nil || len(m.ring.buf) < need {
+		m.ring = newRing(need)
+	}
+	m.cfg = cfg
+	m.settleN = samples(cfg.SampleRate, cfg.Settle)
+	m.clipN = samples(cfg.SampleRate, cfg.Clip)
+	m.gapN = samples(cfg.SampleRate, cfg.Gap)
+	m.silenceN = samples(cfg.SampleRate, cfg.Silence)
+	m.recheckN = samples(cfg.SampleRate, cfg.Recheck)
 }
 
 // Push feeds the next chunk of mono audio.
@@ -122,6 +185,7 @@ func (m *Machine) Push(samples []float32) Action {
 			m.phase = phaseIdle
 			m.sinceRecheck = 0
 			m.missFails = 0
+			m.wantFull = false
 		}
 		m.soundRun = 0
 	} else {
@@ -133,6 +197,7 @@ func (m *Machine) Push(samples []float32) Action {
 		m.haveTrack = false
 		m.inFlight = false
 		m.missFails = 0
+		m.wantFull = false
 		m.phase = phaseIdle
 		m.gen++
 		return Action{ShowNothing: true}
@@ -150,6 +215,9 @@ func (m *Machine) Push(samples []float32) Action {
 		m.sinceRecheck += n
 		if m.sinceRecheck >= m.recheckN && m.silenceRun == 0 {
 			m.sinceRecheck = 0
+			if m.wantFull {
+				return m.startIdentify("full")
+			}
 			return m.startIdentify("recheck")
 		}
 	}
@@ -159,9 +227,15 @@ func (m *Machine) Push(samples []float32) Action {
 func (m *Machine) startIdentify(reason string) Action {
 	m.gen++
 	m.inFlight = true
+	n := m.clipN
+	if m.wantFull || reason == "full" {
+		n = m.ring.available()
+		reason = "full"
+		m.wantFull = false
+	}
 	return Action{
 		Identify:   true,
-		Clip:       m.ring.last(m.clipN),
+		Clip:       m.ring.last(n),
 		Generation: m.gen,
 		Reason:     reason,
 	}
@@ -180,6 +254,7 @@ func (m *Machine) Finish(gen int, found bool) (accept bool) {
 		m.haveTrack = true
 		m.nothingShown = false
 		m.missFails = 0
+		m.wantFull = false
 		m.phase = phasePlaying
 	} else if m.phase != phaseIdle {
 		m.phase = phasePlaying
@@ -196,25 +271,22 @@ func (m *Machine) ScheduleRecheck(wait time.Duration) {
 		wait = m.cfg.Recheck
 	}
 	m.missFails = 0
+	m.wantFull = false
 	m.recheckN = samples(m.cfg.SampleRate, wait)
 	m.sinceRecheck = 0
 }
 
-// ScheduleMissRecheck backs off after a no-match: 10s, then 15s for several
-// tries, then 30s — keep sampling hard albums instead of waiting a full minute.
+// ScheduleMissRecheck waits MissWait (default 30s) while audio keeps buffering,
+// then the next identify sends the whole ring.
 func (m *Machine) ScheduleMissRecheck() time.Duration {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.missFails++
-	var wait time.Duration
-	switch {
-	case m.missFails <= 1:
-		wait = 10 * time.Second
-	case m.missFails <= 8:
-		wait = 15 * time.Second
-	default:
-		wait = 30 * time.Second
+	wait := m.cfg.MissWait
+	if wait <= 0 {
+		wait = 20 * time.Second
 	}
+	m.wantFull = true
 	m.recheckN = samples(m.cfg.SampleRate, wait)
 	m.sinceRecheck = 0
 	return wait
@@ -300,6 +372,13 @@ func newRing(n int) *ring {
 	return &ring{buf: make([]float32, n)}
 }
 
+func (r *ring) available() int {
+	if r.full {
+		return len(r.buf)
+	}
+	return r.pos
+}
+
 func (r *ring) write(s []float32) {
 	for _, v := range s {
 		r.buf[r.pos] = v
@@ -312,10 +391,7 @@ func (r *ring) write(s []float32) {
 }
 
 func (r *ring) last(n int) []float32 {
-	available := r.pos
-	if r.full {
-		available = len(r.buf)
-	}
+	available := r.available()
 	if n > available {
 		n = available
 	}

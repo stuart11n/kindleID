@@ -4,11 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"image"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -21,64 +16,25 @@ import (
 	"github.com/alexgorbatchev/goshazam/pkg/models"
 )
 
-// Track is the part of a Shazam match the screen needs.
-type Track struct {
-	Key      string
-	Title    string
-	Artist   string
-	Album    string
-	Year     string
-	ArtURL   string
-	Offset   time.Duration // position in the track where the clip matched
-	Duration time.Duration // track length when known
-}
-
-// Client sends a clip to Shazam.
-type Client struct {
+type shazamRecognizer struct {
 	shazam *goshazam.Shazam
 	http   *http.Client
 }
 
-func New() *Client {
-	return &Client{
-		shazam: goshazam.New(
-			goshazam.WithLanguage("en-US"),
-			goshazam.WithEndpointCountry("US"),
-			goshazam.WithTimeout(45*time.Second),
-		),
-		http: &http.Client{Timeout: 45 * time.Second},
-	}
-}
-
-// Identify fingerprints a mono 16 kHz clip (default ~30s).
-// A nil track and a nil error means Shazam had no match.
-// Line-in ADCs often clip; if the first attempt misses, retry at half gain.
-func (c *Client) Identify(ctx context.Context, samples []float32) (*Track, error) {
+// Identify fingerprints a mono 16 kHz clip via unofficial goshazam.
+// A nil track and a nil error means no match.
+// Keeps the fingerprint short — signature generation is CPU-heavy on Pi 1.
+func (c *shazamRecognizer) Identify(ctx context.Context, samples []float32) (*Track, error) {
 	if len(samples) < 16000 {
 		return nil, fmt.Errorf("clip is only %d samples", len(samples))
 	}
-	peak, clipPct := peakStats(samples)
-	track, err := c.recognize(ctx, prepareClip(samples, peak, true))
-	if err != nil {
-		return nil, err
-	}
-	if track != nil {
-		return track, nil
-	}
-	// Hot line-in / soft clip wrecks fingerprints; phone mics AGC around this.
-	if clipPct >= 0.001 || peak >= 0.95 {
-		track, err = c.recognize(ctx, prepareClip(samples, peak, false))
-		if err != nil {
-			return nil, err
-		}
-		if track != nil {
-			return track, nil
-		}
-	}
-	return nil, nil
+	// Cap at 8s: longer windows crush ARMv6 fingerprinting and rarely help.
+	samples = lastSeconds(samples, 16000, 8)
+	peak, _ := peakStats(samples)
+	return c.recognize(ctx, prepareClip(samples, peak, true))
 }
 
-func (c *Client) recognize(ctx context.Context, samples []float32) (*Track, error) {
+func (c *shazamRecognizer) recognize(ctx context.Context, samples []float32) (*Track, error) {
 	pcm := make([]int16, len(samples))
 	for i, v := range samples {
 		if v > 1 {
@@ -88,20 +44,30 @@ func (c *Client) recognize(ctx context.Context, samples []float32) (*Track, erro
 		}
 		pcm[i] = int16(v * 32767)
 	}
-	resp, err := c.shazam.Recognize(ctx, audio.NewSegment(pcm, 16000, 1))
+	seg := audio.NewSegment(pcm, 16000, 1)
+	sg := audio.CreateSignatureGenerator(seg)
+	sg.SamplesProcessed = 0
+	maxSec := seg.DurationSeconds()
+	if maxSec > 8 {
+		maxSec = 8
+	}
+	if maxSec < 1 {
+		maxSec = 1
+	}
+	sg.MaxTimeSeconds = maxSec
+	sig := sg.GetNextSignature()
+	if sig == nil {
+		return nil, nil
+	}
+	resp, err := c.shazam.RecognizeSignature(ctx, sig)
 	if err != nil {
 		return nil, err
 	}
 	if resp == nil || resp.Track == nil || resp.Track.Title == "" || len(resp.Matches) == 0 {
 		return nil, nil
 	}
-	track := fromResponse(resp)
-	if track.Duration == 0 {
-		if d, err := c.lookupDuration(ctx, resp.Track); err == nil {
-			track.Duration = d
-		}
-	}
-	return track, nil
+	// Skip iTunes duration lookup — extra RTT; AudD/recheck fallback is enough.
+	return fromResponse(resp), nil
 }
 
 func peakStats(samples []float32) (peak float32, clipPct float64) {
@@ -123,7 +89,6 @@ func peakStats(samples []float32) (peak float32, clipPct float64) {
 	return peak, float64(clipped) / float64(len(samples))
 }
 
-// prepareClip peak-normalizes quiet audio, or pulls hot/clipped audio down.
 func prepareClip(samples []float32, peak float32, boostQuiet bool) []float32 {
 	if len(samples) == 0 || peak < 1e-4 {
 		return samples
@@ -131,7 +96,6 @@ func prepareClip(samples []float32, peak float32, boostQuiet bool) []float32 {
 	var g float32
 	switch {
 	case peak >= 0.95:
-		// Likely ADC clip — pull down before fingerprinting.
 		g = 0.7 / peak
 	case boostQuiet && peak < 0.85:
 		g = 0.85 / peak
@@ -230,7 +194,7 @@ func parseDurationText(s string) time.Duration {
 	return 0
 }
 
-func (c *Client) lookupDuration(ctx context.Context, info *models.TrackInfo) (time.Duration, error) {
+func (c *shazamRecognizer) lookupDuration(ctx context.Context, info *models.TrackInfo) (time.Duration, error) {
 	id := appleTrackID(info)
 	if id == "" {
 		return 0, fmt.Errorf("no apple track id")
@@ -287,34 +251,9 @@ func appleTrackID(info *models.TrackInfo) string {
 		if m := appleTrackIDRe.FindStringSubmatch(*act.URI); len(m) == 2 {
 			return m[1]
 		}
-		// applemusicplay often has type applemusicplay and id field
 		if strings.EqualFold(act.Type, "applemusicplay") && act.ID != nil && *act.ID != "" {
 			return *act.ID
 		}
 	}
 	return ""
-}
-
-// DownloadArt fetches cover art. A failure leaves the screen with text only.
-func (c *Client) DownloadArt(ctx context.Context, rawURL string) (image.Image, error) {
-	if rawURL == "" {
-		return nil, nil
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("cover art status %s", resp.Status)
-	}
-	img, _, err := image.Decode(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, err
-	}
-	return img, nil
 }

@@ -9,3 +9,4 @@ server.err.log
 /config.local.json
 /cmd/kindle-shazam/z_site_defaults.go
 /deploy/pi/kindle-extension-staged/
+/deploy/pi/kindle-shazam.env

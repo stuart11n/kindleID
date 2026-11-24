@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"image/png"
 	"math"
+	"strings"
 
 	"golang.org/x/image/draw"
 	"golang.org/x/image/font"
@@ -22,6 +23,7 @@ type Card struct {
 	Album  string
 	Year   string
 	Art    image.Image
+	Footer string // e.g. identify A/B rates, bottom-right
 }
 
 func albumLine(card Card) string {
@@ -87,14 +89,12 @@ func drawCard(width, height int, card Card) (*image.Gray, error) {
 	if card.Title == "" && card.Art == nil {
 		idle := mustFace(goregular.TTF, px(scale, 64))
 		drawCentered(img, idle, "Nothing playing.", height/2, 0)
-		return img, nil
-	}
-
-	if width > height {
+	} else if width > height {
 		drawLandscape(img, card, pad, scale, titleFace, bodyFace, albumFace)
-		return img, nil
+	} else {
+		drawPortrait(img, card, pad, scale, titleFace, bodyFace, albumFace)
 	}
-	drawPortrait(img, card, pad, scale, titleFace, bodyFace, albumFace)
+	drawFooter(img, scale, card.Footer)
 	return img, nil
 }
 
@@ -358,6 +358,26 @@ func stringsTrim(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+func drawFooter(img *image.Gray, scale int, footer string) {
+	footer = strings.TrimSpace(footer)
+	if footer == "" || img == nil {
+		return
+	}
+	face := mustFace(goregular.TTF, px(scale, 22))
+	pad := scale / 18
+	if pad < 16 {
+		pad = 16
+	}
+	b := img.Bounds()
+	w := measure(face, footer)
+	x := b.Dx() - pad - w
+	if x < pad {
+		x = pad
+	}
+	baseline := b.Dy() - pad
+	drawAt(img, face, footer, x, baseline, 90)
 }
 
 func measure(face font.Face, s string) int {

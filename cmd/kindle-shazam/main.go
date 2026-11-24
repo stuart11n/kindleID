@@ -14,6 +14,7 @@ import (
 
 	"kindle-shazam/internal/audio"
 	"kindle-shazam/internal/detect"
+	"kindle-shazam/internal/identify"
 	"kindle-shazam/internal/listen"
 	"kindle-shazam/internal/server"
 	"kindle-shazam/internal/solaredge"
@@ -37,9 +38,11 @@ func main() {
 	width := flag.Int("width", 1448, "logical screen width (Paperwhite 7th gen landscape is 1448; portrait is 1072)")
 	height := flag.Int("height", 1072, "logical screen height (Paperwhite 7th gen landscape is 1072; portrait is 1448)")
 	threshold := flag.Float64("threshold", 0.005, "RMS below this counts as silence")
-	settle := flag.Duration("settle", 6*time.Second, "sound required before a new track is real")
-	clip := flag.Duration("clip", 30*time.Second, "audio sent to Shazam")
-	gap := flag.Duration("gap", 2*time.Second, "silence that separates tracks")
+	settle := flag.Duration("settle", 2*time.Second, "sound required before a new track is real")
+	clip := flag.Duration("clip", 5*time.Second, "first audio length sent to identify (AudD uses ~last 12s)")
+	missWait := flag.Duration("miss-wait", 20*time.Second, "after a miss, keep recording this long then resubmit the whole buffer")
+	fullClip := flag.Duration("full-clip", 30*time.Second, "RAM ring length kept for full resubmit after a miss")
+	gap := flag.Duration("gap", 500*time.Millisecond, "silence that separates tracks")
 	silence := flag.Duration("silence", 20*time.Second, "silence before Nothing playing")
 	recheck := flag.Duration("recheck", time.Minute, "how often a playing record is checked again")
 	lat := flag.Float64("lat", mustFloat(defaultLat), "weather latitude")
@@ -51,6 +54,9 @@ func main() {
 	solarAddr := flag.String("solar-modbus", envOr("SOLAREDGE_MODBUS", defaultSolarModbus), "SolarEdge Modbus TCP host:port")
 	solarUnit := flag.Uint("solar-unit", mustUint(defaultSolarUnit), "SolarEdge Modbus unit id")
 	radar := flag.Bool("radar", false, "cycle the right idle panel with a 100mi radar map")
+	identifyProvider := flag.String("identify", envOr("IDENTIFY_PROVIDER", "both"), "music ID backend: both (race AudD+Shazam), audd, or shazam")
+	auddToken := flag.String("audd-token", envOr("AUDD_API_TOKEN", ""), "AudD API token (or set AUDD_API_TOKEN)")
+	settingsPath := flag.String("settings", envOr("KINDLE_SHAZAM_SETTINGS", server.DefaultSettingsPath()), "runtime settings JSON path")
 	flag.Parse()
 
 	log.SetFlags(log.Ltime)
@@ -64,14 +70,53 @@ func main() {
 		return
 	}
 
-	display := server.NewDisplay(*device, *threshold)
+	base := server.SettingsValues{
+		Identify:     *identifyProvider,
+		Threshold:    *threshold,
+		Settle:       server.FormatDuration(*settle),
+		Clip:         server.FormatDuration(*clip),
+		MissWait:     server.FormatDuration(*missWait),
+		FullClip:     server.FormatDuration(*fullClip),
+		Gap:          server.FormatDuration(*gap),
+		Silence:      server.FormatDuration(*silence),
+		Recheck:      server.FormatDuration(*recheck),
+		WeatherEvery: server.FormatDuration(*weatherEvery),
+		SolarEvery:   server.FormatDuration(*solarEvery),
+		Celsius:      *celsius,
+		Radar:        *radar,
+		Lat:          *lat,
+		Lon:          *lon,
+		Place:        *place,
+		Width:        *width,
+		Height:       *height,
+		AudDToken:    *auddToken,
+	}
+	settings, err := server.NewSettings(*settingsPath, base)
+	if err != nil {
+		log.Fatal(err)
+	}
+	v := settings.GetRaw()
+
+	display := server.NewDisplay(*device, v.Threshold)
+	display.SetSettings(settings)
 	// Keep the last 50 lines in RAM only (/log). Do not write to stderr/journal.
 	log.SetOutput(display.Logs())
+
+	idClient, err := identify.New(identify.Options{
+		Provider:  v.Identify,
+		AudDToken: v.AudDToken,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("identify %s", idClient.Name())
+	log.Printf("settings %s", settings.Path())
+
 	wx := weather.New(weather.Options{
-		Lat:     *lat,
-		Lon:     *lon,
-		Place:   *place,
-		Celsius: *celsius,
+		Lat:     v.Lat,
+		Lon:     v.Lon,
+		Place:   v.Place,
+		Celsius: v.Celsius,
 	})
 	se := solaredge.NewModbus(solaredge.ModbusOptions{
 		Addr:   *solarAddr,
@@ -88,21 +133,25 @@ func main() {
 		errCh <- listen.Run(ctx, listen.Options{
 			Device:       *device,
 			Display:      display,
-			Width:        *width,
-			Height:       *height,
+			Client:       idClient,
+			Width:        v.Width,
+			Height:       v.Height,
 			Weather:      wx,
 			SolarEdge:    se,
-			Refresh:      *weatherEvery,
-			SolarRefresh: *solarEvery,
-			Radar:        *radar,
+			Refresh:      server.MustDuration(v.WeatherEvery, 15*time.Minute),
+			SolarRefresh: server.MustDuration(v.SolarEvery, time.Minute),
+			Radar:        v.Radar,
+			Settings:     settings,
 			Detect: detect.Config{
 				SampleRate: 16000,
-				Threshold:  *threshold,
-				Settle:     *settle,
-				Clip:       *clip,
-				Gap:        *gap,
-				Silence:    *silence,
-				Recheck:    *recheck,
+				Threshold:  v.Threshold,
+				Settle:     server.MustDuration(v.Settle, 2*time.Second),
+				Clip:       server.MustDuration(v.Clip, 5*time.Second),
+				MissWait:   server.MustDuration(v.MissWait, 20*time.Second),
+				FullClip:   server.MustDuration(v.FullClip, 30*time.Second),
+				Gap:        server.MustDuration(v.Gap, 500*time.Millisecond),
+				Silence:    server.MustDuration(v.Silence, 20*time.Second),
+				Recheck:    server.MustDuration(v.Recheck, time.Minute),
 			},
 		})
 	}()
@@ -116,6 +165,7 @@ func main() {
 		log.Printf("http %s", *listenAddr)
 		for _, url := range kindleURLs(*listenAddr) {
 			log.Printf("kindle %s", url)
+			log.Printf("settings %s/settings", url)
 		}
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err

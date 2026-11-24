@@ -22,6 +22,8 @@ case "$url" in
 esac
 
 : >"$EXT/loop.log"
+# Clear any remote-stop latch on the Pi so a fresh Start keeps running.
+wget -q -O /dev/null "$url/kindle/clear" >/dev/null 2>&1 || true
 np_msg "taking over screen..."
 np_stop_framework
 np_msg "starting -> $url"

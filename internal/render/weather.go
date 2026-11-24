@@ -15,6 +15,10 @@ import (
 
 // WeatherPNG draws a TRMNL-style idle weather screen.
 func WeatherPNG(width, height int, snap weather.Snapshot) ([]byte, error) {
+	return weatherPNG(width, height, snap, "")
+}
+
+func weatherPNG(width, height int, snap weather.Snapshot, footer string) ([]byte, error) {
 	if width < 64 || height < 64 {
 		return nil, errSize
 	}
@@ -30,9 +34,11 @@ func WeatherPNG(width, height int, snap weather.Snapshot) ([]byte, error) {
 	}
 	if width > height {
 		drawWeatherLandscape(img, snap, pad, scale)
+		drawFooter(img, scale, footer)
 		img = SoftRotateCCW(img)
 	} else {
 		drawWeatherPortrait(img, snap, pad, scale)
+		drawFooter(img, scale, footer)
 	}
 	return encode(img)
 }
@@ -173,20 +179,16 @@ func drawWeatherIcon(img *image.Gray, code, x, y, size int) {
 	r := size / 3
 	switch {
 	case code == 0 || code == 1:
-		fillCircle(img, cx, cy, r*2/3, ink)
-		for a := 0; a < 8; a++ {
-			rad := float64(a) * math.Pi / 4
-			x0 := cx + int(float64(r)*0.55*math.Cos(rad))
-			y0 := cy + int(float64(r)*0.55*math.Sin(rad))
-			x1 := cx + int(float64(r)*1.05*math.Cos(rad))
-			y1 := cy + int(float64(r)*1.05*math.Sin(rad))
-			thickLine(img, x0, y0, x1, y1, ink, 3)
-		}
+		sunR := r * 2 / 3
+		strokeCircle(img, cx, cy, sunR, ink, 3)
+		drawSunRays(img, cx, cy, sunR, ink, 3)
 		if code == 1 {
 			drawCloud(img, cx+size/8, cy+size/6, size/3, cloud)
 		}
 	case code == 2:
-		fillCircle(img, cx-size/6, cy-size/6, r/2, ink)
+		sx, sy, sr := cx-size/6, cy-size/6, r/2
+		strokeCircle(img, sx, sy, sr, ink, 3)
+		drawSunRays(img, sx, sy, sr, ink, 3)
 		drawCloud(img, cx, cy+size/10, size/2, cloud)
 	case code == 3 || code == 45 || code == 48:
 		drawCloud(img, cx, cy, size/2, cloud)
@@ -214,6 +216,20 @@ func drawWeatherIcon(img *image.Gray, code, x, y, size int) {
 	}
 }
 
+// drawSunRays paints eight short strokes outside the sun disc.
+func drawSunRays(img *image.Gray, cx, cy, sunR int, shade uint8, thick int) {
+	inner := float64(sunR) * 1.25
+	outer := float64(sunR) * 1.85
+	for a := 0; a < 8; a++ {
+		rad := float64(a) * math.Pi / 4
+		x0 := cx + int(inner*math.Cos(rad))
+		y0 := cy + int(inner*math.Sin(rad))
+		x1 := cx + int(outer*math.Cos(rad))
+		y1 := cy + int(outer*math.Sin(rad))
+		thickLine(img, x0, y0, x1, y1, shade, thick)
+	}
+}
+
 func drawCloud(img *image.Gray, cx, cy, size int, shade uint8) {
 	fillCircle(img, cx-size/3, cy, size/3, shade)
 	fillCircle(img, cx+size/4, cy, size/3, shade)
@@ -236,6 +252,30 @@ func fillCircle(img *image.Gray, cx, cy, r int, shade uint8) {
 	for dy := -r; dy <= r; dy++ {
 		for dx := -r; dx <= r; dx++ {
 			if dx*dx+dy*dy <= r2 {
+				setInk(img, cx+dx, cy+dy, shade)
+			}
+		}
+	}
+}
+
+func strokeCircle(img *image.Gray, cx, cy, r int, shade uint8, thick int) {
+	if r < 1 {
+		return
+	}
+	if thick < 1 {
+		thick = 1
+	}
+	// Midpoint-ish ring: paint pixels near radius r.
+	outer2 := (r + thick/2) * (r + thick/2)
+	inner := r - (thick+1)/2
+	inner2 := 0
+	if inner > 0 {
+		inner2 = inner * inner
+	}
+	for dy := -r - thick; dy <= r+thick; dy++ {
+		for dx := -r - thick; dx <= r+thick; dx++ {
+			d2 := dx*dx + dy*dy
+			if d2 <= outer2 && d2 >= inner2 {
 				setInk(img, cx+dx, cy+dy, shade)
 			}
 		}
