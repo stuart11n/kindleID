@@ -15,7 +15,10 @@ KindleID turns a jailbroken Kindle into an always-on now-playing display. A Rasp
 Copy `config.example.json` → `config.local.json` (gitignored), then from the repo root:
 
 ```powershell
+powershell -File deploy/pi/solaredge-auth.ps1   # once: OAuth for SolarEdge Monitoring API V2
 powershell -File deploy/pi/deploy.ps1
 ```
+
+SolarEdge Site Access needs a developer-app redirect URI of `http://127.0.0.1:8765/callback`. Prefer the cloud API over Modbus when `solaredge_*` fields are set (poll clamped to 15 m for API rate limits).
 
 More Pi host detail: [`deploy/pi/README.md`](deploy/pi/README.md).

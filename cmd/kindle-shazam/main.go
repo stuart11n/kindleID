@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"time"
 
 	"kindle-shazam/internal/audio"
@@ -50,9 +51,14 @@ func main() {
 	place := flag.String("place", defaultPlace, "weather location label")
 	celsius := flag.Bool("celsius", false, "show temperatures in Celsius")
 	weatherEvery := flag.Duration("weather-every", 15*time.Minute, "how often to refresh idle weather")
-	solarEvery := flag.Duration("solar-every", time.Minute, "how often to refresh Modbus solar stats")
-	solarAddr := flag.String("solar-modbus", envOr("SOLAREDGE_MODBUS", defaultSolarModbus), "SolarEdge Modbus TCP host:port")
+	solarEvery := flag.Duration("solar-every", time.Minute, "how often to refresh solar stats")
+	solarAddr := flag.String("solar-modbus", envOr("SOLAREDGE_MODBUS", defaultSolarModbus), "SolarEdge Modbus TCP host:port (fallback if API unset)")
 	solarUnit := flag.Uint("solar-unit", mustUint(defaultSolarUnit), "SolarEdge Modbus unit id")
+	seClientID := flag.String("solaredge-client-id", envOr("SOLAREDGE_CLIENT_ID", ""), "SolarEdge OAuth client id")
+	seClientSecret := flag.String("solaredge-client-secret", envOr("SOLAREDGE_CLIENT_SECRET", ""), "SolarEdge OAuth client secret")
+	seSiteID := flag.String("solaredge-site-id", envOr("SOLAREDGE_SITE_ID", ""), "SolarEdge site id")
+	seRefresh := flag.String("solaredge-refresh-token", envOr("SOLAREDGE_REFRESH_TOKEN", ""), "SolarEdge OAuth refresh token (seed; rotated tokens persist on disk)")
+	seTokenPath := flag.String("solaredge-token-path", envOr("SOLAREDGE_TOKEN_PATH", solaredge.DefaultTokenPath()), "path for SolarEdge OAuth token JSON")
 	radar := flag.Bool("radar", false, "cycle the right idle panel with a 100mi radar map")
 	identifyProvider := flag.String("identify", envOr("IDENTIFY_PROVIDER", "both"), "music ID backend: both (race AudD+Shazam), audd, or shazam")
 	auddToken := flag.String("audd-token", envOr("AUDD_API_TOKEN", ""), "AudD API token (or set AUDD_API_TOKEN)")
@@ -118,12 +124,28 @@ func main() {
 		Place:   v.Place,
 		Celsius: v.Celsius,
 	})
-	se := solaredge.NewModbus(solaredge.ModbusOptions{
-		Addr:   *solarAddr,
-		UnitID: byte(*solarUnit),
+	var se solaredge.Source
+	api := solaredge.NewOAuth(solaredge.OAuthOptions{
+		ClientID:     *seClientID,
+		ClientSecret: *seClientSecret,
+		SiteID:       *seSiteID,
+		RefreshToken: *seRefresh,
+		TokenPath:    *seTokenPath,
 	})
-	if se.Enabled() {
-		log.Printf("solaredge modbus %s unit %d", *solarAddr, *solarUnit)
+	if api.Enabled() {
+		se = api
+		log.Printf("solaredge api site %s (oauth)", *seSiteID)
+	} else if strings.TrimSpace(*seClientID) != "" {
+		log.Printf("solaredge api: need refresh token (run deploy/pi/solaredge-auth.ps1)")
+	} else {
+		mb := solaredge.NewModbus(solaredge.ModbusOptions{
+			Addr:   *solarAddr,
+			UnitID: byte(*solarUnit),
+		})
+		se = mb
+		if mb.Enabled() {
+			log.Printf("solaredge modbus %s unit %d", *solarAddr, *solarUnit)
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

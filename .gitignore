@@ -7,6 +7,7 @@
 server.out.log
 server.err.log
 /config.local.json
+/solaredge-token.json
 /cmd/kindle-shazam/z_site_defaults.go
 /deploy/pi/kindle-extension-staged/
 /deploy/pi/kindle-shazam.env

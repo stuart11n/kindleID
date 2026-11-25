@@ -274,11 +274,13 @@ const settingsHTML = `<!DOCTYPE html>
             <option value="1h">1h</option>
           </select>
         </label>
-        <label>Solar refresh
+        <label>Solar refresh <span>API uses ~15m samples; faster mostly burns credits</span>
           <select name="solar_every" id="solar_every">
-            <option value="30s">30s</option>
             <option value="1m">1m</option>
             <option value="5m">5m</option>
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
           </select>
         </label>
         <label>Radar panel

@@ -148,11 +148,26 @@ func Run(ctx context.Context, opts Options) error {
 			case idle.Weather != nil && idle.ShowSatellite:
 				log.Printf("screen: weather %s %d%s + radar", idle.Weather.Place, idle.Weather.Temp, idle.Weather.Unit)
 			case idle.Weather != nil && idle.Solar != nil:
-				batt := ""
-				if idle.Solar.HasBattery {
-					batt = fmtBattery(idle.Solar.BatteryPct)
+				extra := " solar " + solaredge.FormatPower(idle.Solar.PVWatts)
+				if idle.Solar.HasMeter {
+					dir := "import"
+					if idle.Solar.GridExport {
+						dir = "export"
+					}
+					extra += " grid " + solaredge.FormatPower(idle.Solar.GridWatts) + " " + dir
+					extra += " load " + solaredge.FormatPower(idle.Solar.LoadWatts)
 				}
-				log.Printf("screen: weather %s %d%s + solar %s%s", idle.Weather.Place, idle.Weather.Temp, idle.Weather.Unit, solaredge.FormatPower(idle.Solar.PVWatts), batt)
+				if idle.Solar.HasBattery {
+					extra += fmtBattery(idle.Solar.BatteryPct)
+					if idle.Solar.BatteryWatts > 25 {
+						if idle.Solar.BatteryCharging {
+							extra += " chg " + solaredge.FormatPower(idle.Solar.BatteryWatts)
+						} else {
+							extra += " dis " + solaredge.FormatPower(idle.Solar.BatteryWatts)
+						}
+					}
+				}
+				log.Printf("screen: weather %s %d%s +%s", idle.Weather.Place, idle.Weather.Temp, idle.Weather.Unit, extra)
 			case idle.Weather != nil:
 				log.Printf("screen: weather %s %d%s %s", idle.Weather.Place, idle.Weather.Temp, idle.Weather.Unit, idle.Weather.Condition)
 			case idle.Solar != nil:
@@ -249,6 +264,8 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	intervalKick := make(chan struct{}, 1)
+
 	if opts.Settings != nil {
 		opts.Settings.OnApply(func(v server.SettingsValues) error {
 			cfg := detect.Config{
@@ -304,7 +321,12 @@ func Run(ctx context.Context, opts Options) error {
 				showIdle(true)
 			}
 			go func() { _ = refreshWeather() }()
-			log.Printf("settings applied (identify %s, place %q)", client.Name(), v.Place)
+			go refreshSolar()
+			select {
+			case intervalKick <- struct{}{}:
+			default:
+			}
+			log.Printf("settings applied (identify %s, place %q, solar every %s)", client.Name(), v.Place, v.SolarEvery)
 			return nil
 		})
 	}
@@ -334,10 +356,11 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	go func() {
-		wt := time.NewTicker(opts.Refresh)
-		st := time.NewTicker(opts.SolarRefresh)
-		defer wt.Stop()
-		defer st.Stop()
+		weatherDur, solarDur, _ := lv.flags()
+		weatherTimer := time.NewTimer(weatherDur)
+		solarTimer := time.NewTimer(solarDur)
+		defer weatherTimer.Stop()
+		defer solarTimer.Stop()
 		var weatherRetry <-chan time.Time
 
 		var satC <-chan time.Time
@@ -351,24 +374,48 @@ func Run(ctx context.Context, opts Options) error {
 			cycleC = cycle.C
 		}
 
+		resetTimers := func() {
+			wd, sd, _ := lv.flags()
+			if !weatherTimer.Stop() {
+				select {
+				case <-weatherTimer.C:
+				default:
+				}
+			}
+			if !solarTimer.Stop() {
+				select {
+				case <-solarTimer.C:
+				default:
+				}
+			}
+			weatherTimer.Reset(wd)
+			solarTimer.Reset(sd)
+		}
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-wt.C:
+			case <-intervalKick:
+				resetTimers()
+			case <-weatherTimer.C:
 				if !refreshWeather() {
 					weatherRetry = time.After(30 * time.Second)
 				} else {
 					weatherRetry = nil
 				}
+				wd, _, _ := lv.flags()
+				weatherTimer.Reset(wd)
 			case <-weatherRetry:
 				if !refreshWeather() {
 					weatherRetry = time.After(30 * time.Second)
 				} else {
 					weatherRetry = nil
 				}
-			case <-st.C:
+			case <-solarTimer.C:
 				refreshSolar()
+				_, sd, _ := lv.flags()
+				solarTimer.Reset(sd)
 			case <-satC:
 				refreshSatellite()
 			case <-cycleC:

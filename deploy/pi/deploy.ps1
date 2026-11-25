@@ -10,11 +10,18 @@ if (-not (Test-Path $cfgPath)) {
   throw "Missing $cfgPath — copy config.example.json to config.local.json and fill in values."
 }
 $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
-foreach ($req in 'lat','lon','place','solar_modbus','pi_ssh','kindle_server_url') {
+foreach ($req in 'lat','lon','place','pi_ssh','kindle_server_url') {
   if ($null -eq $cfg.$req -or "$($cfg.$req)" -eq '') { throw "config.local.json missing '$req'" }
+}
+$useAPI = [string]$cfg.solaredge_client_id -and [string]$cfg.solaredge_client_secret -and [string]$cfg.solaredge_site_id
+if (-not $useAPI) {
+  if ($null -eq $cfg.solar_modbus -or "$($cfg.solar_modbus)" -eq '') {
+    throw "config.local.json: set solaredge_* API fields or solar_modbus"
+  }
 }
 $unit = 1
 if ($cfg.solar_unit) { $unit = [int]$cfg.solar_unit }
+if (-not $cfg.solar_modbus) { $cfg | Add-Member -NotePropertyName solar_modbus -NotePropertyValue 'SOLAREDGE_HOST:502' -Force }
 
 # Generate site defaults (gitignored) so values with spaces work on Windows.
 $gen = Join-Path $Root 'cmd\kindle-shazam\z_site_defaults.go'
@@ -64,20 +71,44 @@ if ($identify -eq 'audd' -or $identify -eq 'aud' -or $identify -eq 'both' -or $i
 }
 
 # Secrets go in an env file on the Pi — never baked into the binary.
+$seClientId = ''
+$seClientSecret = ''
+$seSiteId = ''
+$seRefresh = ''
+if ($cfg.solaredge_client_id) { $seClientId = [string]$cfg.solaredge_client_id }
+if ($cfg.solaredge_client_secret) { $seClientSecret = [string]$cfg.solaredge_client_secret }
+if ($cfg.solaredge_site_id) { $seSiteId = [string]$cfg.solaredge_site_id }
+if ($cfg.solaredge_refresh_token) { $seRefresh = [string]$cfg.solaredge_refresh_token }
+$tokenSrc = Join-Path $Root 'solaredge-token.json'
+if ((-not $seRefresh) -and (Test-Path $tokenSrc)) {
+  $tok = Get-Content $tokenSrc -Raw | ConvertFrom-Json
+  if ($tok.refresh_token) { $seRefresh = [string]$tok.refresh_token }
+}
+if ($useAPI -and -not $seRefresh) {
+  throw "SolarEdge API configured but no refresh token — run: powershell -File deploy/pi/solaredge-auth.ps1"
+}
+
 $envLocal = Join-Path $PSScriptRoot 'kindle-shazam.env'
 $envBody = @"
 IDENTIFY_PROVIDER=$identify
 AUDD_API_TOKEN=$auddToken
+SOLAREDGE_CLIENT_ID=$seClientId
+SOLAREDGE_CLIENT_SECRET=$seClientSecret
+SOLAREDGE_SITE_ID=$seSiteId
+SOLAREDGE_REFRESH_TOKEN=$seRefresh
+SOLAREDGE_TOKEN_PATH=/var/lib/kindle-shazam/solaredge-token.json
 "@
 [System.IO.File]::WriteAllText($envLocal, ($envBody -replace "`r`n", "`n"))
 
 Write-Host "Deploying to $($cfg.pi_ssh) (identify=$identify)..."
 $svc = Join-Path $PSScriptRoot 'kindle-shazam.service'
-& scp @sshArgs $out $svc $envLocal "$($cfg.pi_ssh):/tmp/"
+$scpFiles = @($out, $svc, $envLocal)
+if (Test-Path $tokenSrc) { $scpFiles += $tokenSrc }
+& scp @sshArgs @scpFiles "$($cfg.pi_ssh):/tmp/"
 if ($LASTEXITCODE -ne 0) { throw 'scp failed' }
 Remove-Item -Force $envLocal -ErrorAction SilentlyContinue
 
-$remote = 'set -e; test -s /tmp/kindle-shazam-linux-armv6; sudo install -m 755 /tmp/kindle-shazam-linux-armv6 /usr/local/bin/kindle-shazam; sudo install -m 644 /tmp/kindle-shazam.service /etc/systemd/system/kindle-shazam.service; sudo install -m 600 /tmp/kindle-shazam.env /etc/kindle-shazam.env; sudo rm -f /tmp/kindle-shazam.env; sudo mkdir -p /var/lib/kindle-shazam; sudo systemctl daemon-reload; sudo systemctl enable --now kindle-shazam; sudo systemctl restart kindle-shazam; sleep 5; systemctl is-active kindle-shazam; ls -la /usr/local/bin/kindle-shazam; curl -sS -m 15 http://127.0.0.1:8080/version; echo; curl -sS -m 5 "http://127.0.0.1:8080/log?follow=0" | head -n 8'
+$remote = 'set -e; test -s /tmp/kindle-shazam-linux-armv6; sudo install -m 755 /tmp/kindle-shazam-linux-armv6 /usr/local/bin/kindle-shazam; sudo install -m 644 /tmp/kindle-shazam.service /etc/systemd/system/kindle-shazam.service; sudo install -m 600 /tmp/kindle-shazam.env /etc/kindle-shazam.env; sudo rm -f /tmp/kindle-shazam.env; sudo mkdir -p /var/lib/kindle-shazam; if [ -f /tmp/solaredge-token.json ]; then sudo install -m 600 /tmp/solaredge-token.json /var/lib/kindle-shazam/solaredge-token.json; sudo rm -f /tmp/solaredge-token.json; fi; sudo systemctl daemon-reload; sudo systemctl enable --now kindle-shazam; sudo systemctl restart kindle-shazam; sleep 5; systemctl is-active kindle-shazam; ls -la /usr/local/bin/kindle-shazam; curl -sS -m 15 http://127.0.0.1:8080/version; echo; curl -sS -m 5 "http://127.0.0.1:8080/log?follow=0" | head -n 12'
 & ssh @sshArgs $cfg.pi_ssh $remote
 if ($LASTEXITCODE -ne 0) { throw 'remote install failed' }
 
