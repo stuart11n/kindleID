@@ -274,21 +274,54 @@ const settingsHTML = `<!DOCTYPE html>
             <option value="1h">1h</option>
           </select>
         </label>
-        <label>Solar refresh <span>API uses ~15m samples; faster mostly burns credits</span>
-          <select name="solar_every" id="solar_every">
-            <option value="1m">1m</option>
-            <option value="5m">5m</option>
-            <option value="15m">15m</option>
-            <option value="30m">30m</option>
-            <option value="1h">1h</option>
-          </select>
-        </label>
         <label>Radar panel
           <select name="radar" id="radar">
             <option value="false">Off</option>
             <option value="true">On</option>
           </select>
         </label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>SolarEdge</legend>
+      <div class="row">
+        <label>Source
+          <select name="solar_source" id="solar_source">
+            <option value="api">Cloud API (OAuth)</option>
+            <option value="modbus">Modbus TCP (local inverter)</option>
+          </select>
+        </label>
+        <label>Refresh <span>API: free tier ~2000 credits/mo; no polls 9pm–6am</span>
+          <select name="solar_every" id="solar_every">
+            <option value="15m">15m</option>
+            <option value="30m">30m</option>
+            <option value="1h">1h</option>
+            <option value="2h">2h</option>
+            <option value="4h">4h</option>
+          </select>
+        </label>
+        <label>Modbus host:port
+          <input type="text" name="solar_modbus" id="solar_modbus" placeholder="192.168.1.50:502" autocomplete="off">
+        </label>
+        <label>Modbus unit id
+          <input type="number" name="solar_unit" id="solar_unit" min="1" max="255" step="1" value="1">
+        </label>
+        <label>Site ID <span>from SolarEdge monitoring URL / OAuth</span>
+          <input type="text" name="se_site_id" id="se_site_id" placeholder="1292007" autocomplete="off">
+        </label>
+      </div>
+      <p class="sub" id="seStatus" style="margin:8px 0 4px">SolarEdge status…</p>
+      <p class="sub" id="seRedirect" style="margin:0 0 8px;word-break:break-all;font-size:0.8rem"></p>
+      <div class="actions" style="margin-top:0">
+        <button type="button" class="secondary" id="seConnect">Connect SolarEdge</button>
+        <button type="button" class="secondary" id="seSaveSite">Save site ID</button>
+      </div>
+      <label style="margin-top:8px">Paste auth code <span>if redirect URI is not registered yet</span>
+        <input type="text" name="se_code" id="se_code" placeholder="authorization code" autocomplete="off">
+      </label>
+      <div class="actions">
+        <button type="button" class="secondary" id="seSubmitCode">Submit code</button>
       </div>
     </fieldset>
 
@@ -345,11 +378,6 @@ const settingsHTML = `<!DOCTYPE html>
   </form>
 </main>
 <script>
-const fields = [
-  "identify","threshold","settle","clip","miss_wait","full_clip","gap","silence","recheck",
-  "weather_every","solar_every","celsius","radar","lat","lon","place"
-];
-
 function ensureOption(sel, value) {
   if (!sel || value === undefined || value === null || value === "") return;
   const v = String(value);
@@ -368,6 +396,9 @@ function fill(data) {
   for (const id of ["settle","clip","miss_wait","full_clip","gap","silence","recheck","weather_every","solar_every"]) {
     ensureOption(document.getElementById(id), s[id]);
   }
+  ensureOption(solar_source, s.solar_source || "api");
+  solar_modbus.value = s.solar_modbus || "";
+  solar_unit.value = s.solar_unit > 0 ? s.solar_unit : 1;
   celsius.value = String(!!s.celsius);
   radar.value = String(!!s.radar);
   place.value = s.place || "";
@@ -379,10 +410,41 @@ function fill(data) {
   tokenHint.textContent = s.has_audd_token ? "token set — leave blank to keep" : "required for audd/both";
 }
 
+async function loadSolar() {
+  try {
+    const res = await fetch("/settings/solaredge.json", {cache:"no-store"});
+    if (!res.ok) throw new Error(await res.text());
+    const se = await res.json();
+    if (se.site_id && !se_site_id.value) se_site_id.value = se.site_id;
+    else if (se.site_id) se_site_id.value = se.site_id;
+    let line = "API: ";
+    if (!se.configured) line += "client id/secret missing on server";
+    else if (se.authorized) line += "authorized" + (se.site_id ? " (site " + se.site_id + ")" : "");
+    else line += "not authorized — Connect below";
+    seStatus.textContent = line;
+    seRedirect.textContent = se.redirect_uri
+      ? "Register redirect URI: " + se.redirect_uri
+      : "";
+  } catch (err) {
+    seStatus.textContent = "API status unavailable: " + (err.message || err);
+  }
+}
+
 async function load() {
   const res = await fetch("/settings.json", {cache:"no-store"});
   if (!res.ok) throw new Error(await res.text());
   fill(await res.json());
+  await loadSolar();
+  const q = new URLSearchParams(location.search);
+  if (q.get("solaredge") === "ok") {
+    msg.className = "msg ok";
+    msg.textContent = "SolarEdge authorized.";
+    history.replaceState({}, "", "/settings");
+  } else if (q.get("solaredge") === "err") {
+    msg.className = "msg err";
+    msg.textContent = q.get("msg") || "SolarEdge auth failed";
+    history.replaceState({}, "", "/settings");
+  }
 }
 
 f.addEventListener("submit", async (e) => {
@@ -404,6 +466,9 @@ f.addEventListener("submit", async (e) => {
       recheck: recheck.value,
       weather_every: weather_every.value,
       solar_every: solar_every.value,
+      solar_source: solar_source.value,
+      solar_modbus: solar_modbus.value.trim(),
+      solar_unit: Number(solar_unit.value) || 1,
       celsius: celsius.value === "true",
       radar: radar.value === "true",
       lat: Number(lat.value),
@@ -432,6 +497,52 @@ f.addEventListener("submit", async (e) => {
     msg.textContent = String(err.message || err);
   } finally {
     save.disabled = false;
+  }
+});
+
+seConnect.addEventListener("click", () => {
+  location.href = "/settings/solaredge/start";
+});
+
+seSaveSite.addEventListener("click", async () => {
+  msg.className = "msg";
+  msg.textContent = "Saving site ID…";
+  try {
+    const res = await fetch("/settings/solaredge.json", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({site_id: se_site_id.value.trim()}),
+    });
+    if (!res.ok) throw new Error(await res.text() || res.statusText);
+    await loadSolar();
+    msg.className = "msg ok";
+    msg.textContent = "Site ID saved.";
+  } catch (err) {
+    msg.className = "msg err";
+    msg.textContent = String(err.message || err);
+  }
+});
+
+seSubmitCode.addEventListener("click", async () => {
+  msg.className = "msg";
+  msg.textContent = "Exchanging code…";
+  try {
+    const res = await fetch("/settings/solaredge.json", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({
+        code: se_code.value.trim(),
+        site_id: se_site_id.value.trim(),
+      }),
+    });
+    if (!res.ok) throw new Error(await res.text() || res.statusText);
+    se_code.value = "";
+    await loadSolar();
+    msg.className = "msg ok";
+    msg.textContent = "SolarEdge authorized.";
+  } catch (err) {
+    msg.className = "msg err";
+    msg.textContent = String(err.message || err);
   }
 });
 

@@ -22,13 +22,19 @@ type SettingsValues struct {
 	Recheck      string  `json:"recheck"`
 	WeatherEvery string  `json:"weather_every"`
 	SolarEvery   string  `json:"solar_every"`
-	Celsius      bool    `json:"celsius"`
-	Radar        bool    `json:"radar"`
-	Lat          float64 `json:"lat"`
-	Lon          float64 `json:"lon"`
-	Place        string  `json:"place"`
-	Width        int     `json:"width"`
-	Height       int     `json:"height"`
+	// SolarSource is "api" (Monitoring API OAuth) or "modbus" (local TCP).
+	SolarSource string `json:"solar_source"`
+	// SolarModbus is host:port for the inverter Modbus TCP endpoint.
+	SolarModbus string `json:"solar_modbus"`
+	// SolarUnit is the Modbus unit id (usually 1).
+	SolarUnit int `json:"solar_unit"`
+	Celsius   bool    `json:"celsius"`
+	Radar     bool    `json:"radar"`
+	Lat       float64 `json:"lat"`
+	Lon       float64 `json:"lon"`
+	Place     string  `json:"place"`
+	Width     int     `json:"width"`
+	Height    int     `json:"height"`
 	// Frontlight is Kindle flIntensity 0–24, or -1 to leave the device alone.
 	Frontlight int `json:"frontlight"`
 	// AudDToken is write-only from the form; never persisted in GET JSON as plain
@@ -57,12 +63,16 @@ func DefaultSettingsValues() SettingsValues {
 		Silence:      "20s",
 		Recheck:      "1m",
 		WeatherEvery: "15m",
-		SolarEvery:   "1m",
-		Celsius:      false,
-		Radar:        false,
-		Width:        1448,
-		Height:       1072,
-		Frontlight:   -1,
+		// Free SolarEdge API tier ≈2000 credits/mo; poll is 3 calls and
+		// sleeps 21:00–06:00 local. 1h over 15 daytime hours ≈ 1350/mo.
+		SolarEvery:  "1h",
+		SolarSource: "api",
+		SolarUnit:   1,
+		Celsius:     false,
+		Radar:       false,
+		Width:       1448,
+		Height:      1072,
+		Frontlight:  -1,
 	}
 }
 
@@ -129,6 +139,15 @@ func mergeSettings(base, over SettingsValues) SettingsValues {
 	}
 	if over.SolarEvery != "" {
 		out.SolarEvery = over.SolarEvery
+	}
+	if over.SolarSource != "" {
+		out.SolarSource = over.SolarSource
+	}
+	if over.SolarModbus != "" {
+		out.SolarModbus = over.SolarModbus
+	}
+	if over.SolarUnit > 0 {
+		out.SolarUnit = over.SolarUnit
 	}
 	out.Celsius = over.Celsius
 	out.Radar = over.Radar
@@ -234,6 +253,14 @@ func validateSettings(v SettingsValues) error {
 	case "shazam", "audd", "both":
 	default:
 		return fmt.Errorf("identify must be shazam, audd, or both")
+	}
+	switch v.SolarSource {
+	case "", "api", "modbus":
+	default:
+		return fmt.Errorf("solar_source must be api or modbus")
+	}
+	if v.SolarUnit < 0 || v.SolarUnit > 255 {
+		return fmt.Errorf("solar_unit out of range")
 	}
 	for _, pair := range []struct {
 		name, raw string

@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"time"
 
 	"kindle-shazam/internal/audio"
@@ -51,7 +50,7 @@ func main() {
 	place := flag.String("place", defaultPlace, "weather location label")
 	celsius := flag.Bool("celsius", false, "show temperatures in Celsius")
 	weatherEvery := flag.Duration("weather-every", 15*time.Minute, "how often to refresh idle weather")
-	solarEvery := flag.Duration("solar-every", time.Minute, "how often to refresh solar stats")
+	solarEvery := flag.Duration("solar-every", time.Hour, "how often to refresh solar stats daytime (skips 9pm–6am; 1h fits free-tier with meters+storage)")
 	solarAddr := flag.String("solar-modbus", envOr("SOLAREDGE_MODBUS", defaultSolarModbus), "SolarEdge Modbus TCP host:port (fallback if API unset)")
 	solarUnit := flag.Uint("solar-unit", mustUint(defaultSolarUnit), "SolarEdge Modbus unit id")
 	seClientID := flag.String("solaredge-client-id", envOr("SOLAREDGE_CLIENT_ID", ""), "SolarEdge OAuth client id")
@@ -88,6 +87,9 @@ func main() {
 		Recheck:      server.FormatDuration(*recheck),
 		WeatherEvery: server.FormatDuration(*weatherEvery),
 		SolarEvery:   server.FormatDuration(*solarEvery),
+		SolarSource:  "api",
+		SolarModbus:  *solarAddr,
+		SolarUnit:    int(*solarUnit),
 		Celsius:      *celsius,
 		Radar:        *radar,
 		Lat:          *lat,
@@ -124,7 +126,6 @@ func main() {
 		Place:   v.Place,
 		Celsius: v.Celsius,
 	})
-	var se solaredge.Source
 	api := solaredge.NewOAuth(solaredge.OAuthOptions{
 		ClientID:     *seClientID,
 		ClientSecret: *seClientSecret,
@@ -132,19 +133,36 @@ func main() {
 		RefreshToken: *seRefresh,
 		TokenPath:    *seTokenPath,
 	})
-	if api.Enabled() {
-		se = api
-		log.Printf("solaredge api site %s (oauth)", *seSiteID)
-	} else if strings.TrimSpace(*seClientID) != "" {
-		log.Printf("solaredge api: need refresh token (run deploy/pi/solaredge-auth.ps1)")
-	} else {
-		mb := solaredge.NewModbus(solaredge.ModbusOptions{
-			Addr:   *solarAddr,
-			UnitID: byte(*solarUnit),
-		})
-		se = mb
+	display.SetSolarOAuth(api)
+	mbAddr := v.SolarModbus
+	if mbAddr == "" {
+		mbAddr = *solarAddr
+	}
+	mbUnit := byte(v.SolarUnit)
+	if mbUnit == 0 {
+		mbUnit = byte(*solarUnit)
+	}
+	mb := solaredge.NewModbus(solaredge.ModbusOptions{Addr: mbAddr, UnitID: mbUnit})
+	mode := v.SolarSource
+	if mode == "" {
+		mode = solaredge.ModeAPI
+	}
+	solarSwitch := solaredge.NewSwitchable(mode, api, mb)
+	se := solaredge.Source(solarSwitch)
+	switch solarSwitch.Mode() {
+	case solaredge.ModeModbus:
 		if mb.Enabled() {
-			log.Printf("solaredge modbus %s unit %d", *solarAddr, *solarUnit)
+			log.Printf("solaredge modbus %s unit %d", mbAddr, mbUnit)
+		} else {
+			log.Printf("solaredge modbus: set host in /settings")
+		}
+	default:
+		if api.Enabled() {
+			log.Printf("solaredge api site %s (oauth)", api.Status().SiteID)
+		} else if api.Configured() {
+			log.Printf("solaredge api: authorize via /settings")
+		} else {
+			log.Printf("solaredge api: set SOLAREDGE_CLIENT_ID/SECRET on the Pi")
 		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -160,8 +178,9 @@ func main() {
 			Height:       v.Height,
 			Weather:      wx,
 			SolarEdge:    se,
+			SolarSwitch:  solarSwitch,
 			Refresh:      server.MustDuration(v.WeatherEvery, 15*time.Minute),
-			SolarRefresh: server.MustDuration(v.SolarEvery, time.Minute),
+			SolarRefresh: server.MustDuration(v.SolarEvery, time.Hour),
 			Radar:        v.Radar,
 			Settings:     settings,
 			Detect: detect.Config{

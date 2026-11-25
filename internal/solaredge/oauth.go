@@ -43,8 +43,11 @@ type OAuthClient struct {
 	opts OAuthOptions
 	http *http.Client
 
-	mu    sync.Mutex
-	token tokenFile
+	mu            sync.Mutex
+	token         tokenFile
+	overview      Snapshot
+	overviewAt    time.Time
+	overviewEvery time.Duration
 }
 
 func NewOAuth(opts OAuthOptions) *OAuthClient {
@@ -55,7 +58,7 @@ func NewOAuth(opts OAuthOptions) *OAuthClient {
 	if opts.TokenPath == "" {
 		opts.TokenPath = DefaultTokenPath()
 	}
-	oc := &OAuthClient{opts: opts, http: c}
+	oc := &OAuthClient{opts: opts, http: c, overviewEvery: 6 * time.Hour}
 	if t, err := loadTokenFile(opts.TokenPath); err == nil {
 		oc.token = t
 	}
@@ -150,14 +153,23 @@ func (c *OAuthClient) Fetch(ctx context.Context) (Snapshot, error) {
 		snap.HasMeter = true
 	}
 
-	if ov, err := c.getOverview(ctx, token, site); err == nil {
-		snap.TodayWh = ov.TodayWh
-		snap.MonthWh = ov.MonthWh
-		snap.LifetimeWh = ov.LifetimeWh
-		if !ov.Updated.IsZero() {
-			snap.Updated = ov.Updated
+	// Overview is a separate credit; refresh every few hours like ha_int_solaredge.
+	c.mu.Lock()
+	needOV := c.overviewAt.IsZero() || time.Since(c.overviewAt) >= c.overviewEvery
+	ovCached := c.overview
+	c.mu.Unlock()
+	if needOV {
+		if ov, err := c.getOverview(ctx, token, site); err == nil {
+			c.mu.Lock()
+			c.overview = ov
+			c.overviewAt = time.Now()
+			c.mu.Unlock()
+			ovCached = ov
 		}
 	}
+	snap.TodayWh = ovCached.TodayWh
+	snap.MonthWh = ovCached.MonthWh
+	snap.LifetimeWh = ovCached.LifetimeWh
 	return snap, nil
 }
 
@@ -480,7 +492,7 @@ func (c *OAuthClient) accessToken(ctx context.Context) (string, error) {
 func (c *OAuthClient) refresh(ctx context.Context) (string, error) {
 	rt := c.refreshToken()
 	if rt == "" {
-		return "", fmt.Errorf("solaredge oauth: no refresh token (run deploy/pi/solaredge-auth.ps1)")
+		return "", fmt.Errorf("solaredge oauth: no refresh token (authorize via /settings)")
 	}
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")

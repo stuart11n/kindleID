@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"kindle-shazam/internal/solaredge"
 )
 
 // Meta is the track currently on the screen.
@@ -45,10 +47,13 @@ type Display struct {
 	meta      Meta
 	covers    *artCache
 	logs      *LogBuf
-	failures    *FailureStore
-	settings    *Settings
-	lastMusicAt time.Time // last time audio looked like music / a track was shown
-	kindleStop  bool      // Kindle loop should restore UI and exit
+	failures       *FailureStore
+	settings       *Settings
+	lastMusicAt    time.Time // last time audio looked like music / a track was shown
+	kindleStop     bool      // Kindle loop should restore UI and exit
+	solarOAuth     *solaredge.OAuthClient
+	solarPendingMu sync.Mutex
+	solarPending   solarOAuthPending
 }
 
 func NewDisplay(device string, threshold float64) *Display {
@@ -201,6 +206,9 @@ func (d *Display) Handler() http.Handler {
 	mux.HandleFunc("/settings", d.handleSettings)
 	mux.HandleFunc("/settings.json", d.handleSettings)
 	mux.HandleFunc("/settings/restart", d.handleSettingsRestart)
+	mux.HandleFunc("/settings/solaredge.json", d.handleSolarEdge)
+	mux.HandleFunc("/settings/solaredge/start", d.handleSolarEdge)
+	mux.HandleFunc("/settings/solaredge/callback", d.handleSolarEdge)
 	mux.HandleFunc("/kindle/stop", d.handleKindleStop)
 	mux.HandleFunc("/kindle/clear", d.handleKindleClear)
 	mux.HandleFunc("/match-failures", d.handleMatchFailures)

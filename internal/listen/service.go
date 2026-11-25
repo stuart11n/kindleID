@@ -6,6 +6,7 @@ import (
 	"image"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ type Options struct {
 	Client           *identify.Client
 	Weather          *weather.Client
 	SolarEdge        solaredge.Source
+	SolarSwitch      *solaredge.Switchable // optional; enables api/modbus hot-swap
 	Refresh          time.Duration
 	SolarRefresh     time.Duration
 	SatelliteRefresh time.Duration
@@ -90,7 +92,7 @@ func Run(ctx context.Context, opts Options) error {
 		opts.Refresh = 15 * time.Minute
 	}
 	if opts.SolarRefresh <= 0 {
-		opts.SolarRefresh = time.Minute
+		opts.SolarRefresh = time.Hour
 	}
 	if opts.SatelliteRefresh <= 0 {
 		opts.SatelliteRefresh = 10 * time.Minute
@@ -301,9 +303,24 @@ func Run(ctx context.Context, opts Options) error {
 			lv.width = v.Width
 			lv.height = v.Height
 			lv.refresh = server.MustDuration(v.WeatherEvery, 15*time.Minute)
-			lv.solarRefresh = server.MustDuration(v.SolarEvery, time.Minute)
+			lv.solarRefresh = server.MustDuration(v.SolarEvery, time.Hour)
 			lv.radar = v.Radar
 			lv.mu.Unlock()
+			if opts.SolarSwitch != nil {
+				mode := v.SolarSource
+				if mode == "" {
+					mode = solaredge.ModeAPI
+				}
+				opts.SolarSwitch.SetMode(mode)
+				if addr := strings.TrimSpace(v.SolarModbus); addr != "" {
+					unit := byte(v.SolarUnit)
+					if unit == 0 {
+						unit = 1
+					}
+					opts.SolarSwitch.SetModbus(addr, unit)
+				}
+				opts.SolarEdge = opts.SolarSwitch
+			}
 			opts.Display.Observe(machine.State(), machine.RMS())
 
 			// Patch the cached idle snapshot and redraw now (don't wait for next fetch).
@@ -326,7 +343,11 @@ func Run(ctx context.Context, opts Options) error {
 			case intervalKick <- struct{}{}:
 			default:
 			}
-			log.Printf("settings applied (identify %s, place %q, solar every %s)", client.Name(), v.Place, v.SolarEvery)
+			src := v.SolarSource
+			if src == "" {
+				src = "api"
+			}
+			log.Printf("settings applied (identify %s, place %q, solar %s every %s)", client.Name(), v.Place, src, v.SolarEvery)
 			return nil
 		})
 	}
@@ -347,7 +368,11 @@ func Run(ctx context.Context, opts Options) error {
 		case <-time.After(20 * time.Second):
 		}
 	}
-	refreshSolar()
+	if !solarQuietHours(time.Now()) {
+		refreshSolar()
+	} else {
+		log.Printf("solaredge: quiet hours (9pm–6am); next poll at 6am")
+	}
 	if opts.Radar {
 		refreshSatellite()
 	}
@@ -358,7 +383,7 @@ func Run(ctx context.Context, opts Options) error {
 	go func() {
 		weatherDur, solarDur, _ := lv.flags()
 		weatherTimer := time.NewTimer(weatherDur)
-		solarTimer := time.NewTimer(solarDur)
+		solarTimer := time.NewTimer(nextSolarDelay(time.Now(), solarDur))
 		defer weatherTimer.Stop()
 		defer solarTimer.Stop()
 		var weatherRetry <-chan time.Time
@@ -389,7 +414,7 @@ func Run(ctx context.Context, opts Options) error {
 				}
 			}
 			weatherTimer.Reset(wd)
-			solarTimer.Reset(sd)
+			solarTimer.Reset(nextSolarDelay(time.Now(), sd))
 		}
 
 		for {
@@ -413,9 +438,12 @@ func Run(ctx context.Context, opts Options) error {
 					weatherRetry = nil
 				}
 			case <-solarTimer.C:
-				refreshSolar()
+				now := time.Now()
+				if !solarQuietHours(now) {
+					refreshSolar()
+				}
 				_, sd, _ := lv.flags()
-				solarTimer.Reset(sd)
+				solarTimer.Reset(nextSolarDelay(time.Now(), sd))
 			case <-satC:
 				refreshSatellite()
 			case <-cycleC:
@@ -563,4 +591,29 @@ func identifyClip(lv *live, opts Options, machine *detect.Machine, clip []float3
 	}
 	card.Art = img
 	paint(card, meta, false)
+}
+
+// solarQuietHours is 21:00–06:00 local — no SolarEdge API polls (free-tier credits).
+func solarQuietHours(now time.Time) bool {
+	h := now.Hour()
+	return h >= 21 || h < 6
+}
+
+// nextSolarDelay returns the daytime poll interval, or sleep until 06:00 during quiet hours.
+func nextSolarDelay(now time.Time, every time.Duration) time.Duration {
+	if !solarQuietHours(now) {
+		if every <= 0 {
+			every = time.Hour
+		}
+		return every
+	}
+	next := time.Date(now.Year(), now.Month(), now.Day(), 6, 0, 0, 0, now.Location())
+	if now.Hour() >= 21 {
+		next = next.Add(24 * time.Hour)
+	}
+	d := next.Sub(now)
+	if d < time.Second {
+		return time.Second
+	}
+	return d
 }

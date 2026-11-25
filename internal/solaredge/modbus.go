@@ -27,7 +27,21 @@ func NewModbus(opts ModbusOptions) *ModbusClient {
 	return &ModbusClient{opts: opts}
 }
 
+// SetOptions replaces the Modbus TCP endpoint (settings hot-reload).
+func (c *ModbusClient) SetOptions(opts ModbusOptions) {
+	if c == nil {
+		return
+	}
+	if opts.UnitID == 0 {
+		opts.UnitID = 1
+	}
+	c.opts = opts
+}
+
 func (c *ModbusClient) Enabled() bool {
+	if c == nil {
+		return false
+	}
 	addr := c.opts.Addr
 	return addr != "" && addr != "SOLAREDGE_HOST:502"
 }
