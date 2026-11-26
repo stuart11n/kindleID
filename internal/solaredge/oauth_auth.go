@@ -14,6 +14,12 @@ import (
 
 const authorizeURL = "https://connect.solaredge.com/authorize"
 
+// DefaultOAuthRedirectURI is the only LAN-friendly redirect SolarEdge accepts
+// (http://localhost / 127.0.0.1). Register this exact URI in the developer app.
+// After consent the browser lands on localhost (nothing listening) — copy the
+// ?code= from the address bar and paste it on /settings.
+const DefaultOAuthRedirectURI = "http://127.0.0.1:8765/callback"
+
 // Configured reports whether client id/secret are present (auth can start).
 func (c *OAuthClient) Configured() bool {
 	if c == nil {

@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"time"
 
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
@@ -58,7 +59,7 @@ func drawWeatherLandscape(img *image.Gray, snap weather.Snapshot, pad, scale int
 	iconSize := px(scale, 220)
 	iconX := pad
 	iconY := pad + px(scale, 20)
-	drawWeatherIcon(img, snap.Code, iconX, iconY, iconSize)
+	drawWeatherIcon(img, snap.Code, iconX, iconY, iconSize, isNightAt(snap.Sunrise, snap.Sunset, time.Now()), snap.MoonFrac)
 
 	textX := iconX + iconSize + px(scale, 40)
 	y := pad
@@ -92,7 +93,7 @@ func drawWeatherLandscape(img *image.Gray, snap weather.Snapshot, pad, scale int
 		x := pad + i*colW
 		drawCenteredIn(img, dayFace, day.Label, x, colW, forecastTop+dayFace.Metrics().Ascent.Round(), 40)
 		isz := px(scale, 52)
-		drawWeatherIcon(img, day.Code, cx-isz/2, forecastTop+px(scale, 40), isz)
+		drawWeatherIcon(img, day.Code, cx-isz/2, forecastTop+px(scale, 40), isz, false, 0)
 		hi := fmt.Sprintf("%d°", day.High)
 		lo := fmt.Sprintf("%d°", day.Low)
 		hy := forecastTop + px(scale, 130)
@@ -119,7 +120,7 @@ func drawWeatherPortrait(img *image.Gray, snap weather.Snapshot, pad, scale int)
 		y += placeFace.Metrics().Height.Round() + px(scale, 12)
 	}
 	iconSize := px(scale, 180)
-	drawWeatherIcon(img, snap.Code, (width-iconSize)/2, y, iconSize)
+	drawWeatherIcon(img, snap.Code, (width-iconSize)/2, y, iconSize, isNightAt(snap.Sunrise, snap.Sunset, time.Now()), snap.MoonFrac)
 	y += iconSize + px(scale, 16)
 	temp := fmt.Sprintf("%d%s", snap.Temp, snap.Unit)
 	drawCentered(img, tempFace, temp, y+tempFace.Metrics().Ascent.Round(), 0)
@@ -145,7 +146,7 @@ func drawWeatherPortrait(img *image.Gray, snap weather.Snapshot, pad, scale int)
 		cx := x + colW/2
 		drawCenteredIn(img, dayFace, day.Label, x, colW, forecastTop+dayFace.Metrics().Ascent.Round(), 40)
 		isz := px(scale, 48)
-		drawWeatherIcon(img, day.Code, cx-isz/2, forecastTop+px(scale, 36), isz)
+		drawWeatherIcon(img, day.Code, cx-isz/2, forecastTop+px(scale, 36), isz, false, 0)
 		hy := forecastTop + px(scale, 120)
 		drawCenteredIn(img, hiFace, fmt.Sprintf("%d°", day.High), x, colW, hy+hiFace.Metrics().Ascent.Round(), 0)
 		drawCenteredIn(img, loFace, fmt.Sprintf("%d°", day.Low), x, colW, hy+hiFace.Metrics().Height.Round()+px(scale, 6)+loFace.Metrics().Ascent.Round(), 90)
@@ -171,9 +172,24 @@ func hline(img *image.Gray, x0, x1, y int, shade uint8) {
 	}
 }
 
-func drawWeatherIcon(img *image.Gray, code, x, y, size int) {
+func drawWeatherIcon(img *image.Gray, code, x, y, size int, night bool, moonFrac float64) {
+	// Clear night: smaller moon-phase glyph (same drawing as the phase row).
+	if code == 0 && night {
+		moon := size * 38 / 100
+		if moon < 10 {
+			moon = 10
+		}
+		drawMoonIcon(img, x+(size-moon)/2, y+(size-moon)/2, moon, moonFrac)
+		return
+	}
+	ensureWeatherIcons()
+	if src := weatherIconMap[weatherIconName(code, night)]; src != nil {
+		blitGrayScaled(img, src, x, y, size)
+		return
+	}
+	// Fallback procedural glyph if an asset is missing.
 	ink := uint8(20)
-	cloud := uint8(210) // light grey cloud fill
+	cloud := uint8(210)
 	cx := x + size/2
 	cy := y + size/2
 	r := size / 3
@@ -182,35 +198,11 @@ func drawWeatherIcon(img *image.Gray, code, x, y, size int) {
 		sunR := r * 2 / 3
 		strokeCircle(img, cx, cy, sunR, ink, 3)
 		drawSunRays(img, cx, cy, sunR, ink, 3)
-		if code == 1 {
-			drawCloud(img, cx+size/8, cy+size/6, size/3, cloud)
-		}
 	case code == 2:
 		sx, sy, sr := cx-size/6, cy-size/6, r/2
 		strokeCircle(img, sx, sy, sr, ink, 3)
 		drawSunRays(img, sx, sy, sr, ink, 3)
 		drawCloud(img, cx, cy+size/10, size/2, cloud)
-	case code == 3 || code == 45 || code == 48:
-		drawCloud(img, cx, cy, size/2, cloud)
-		if code >= 45 {
-			for i := -2; i <= 2; i++ {
-				hline(img, cx-size/3, cx+size/3, cy+size/4+i*4, 120)
-			}
-		}
-	case code >= 51 && code <= 67 || code >= 80 && code <= 82:
-		drawCloud(img, cx, cy-size/8, size/2, cloud)
-		for i := -1; i <= 1; i++ {
-			thickLine(img, cx+i*size/6, cy+size/8, cx+i*size/6-size/20, cy+size/3, ink, 3)
-		}
-	case code >= 71 && code <= 77 || code >= 85 && code <= 86:
-		drawCloud(img, cx, cy-size/8, size/2, cloud)
-		for i := -1; i <= 1; i++ {
-			drawSnowflake(img, cx+i*size/6, cy+size/5, size/14, ink)
-		}
-	case code >= 95:
-		drawCloud(img, cx, cy-size/8, size/2, cloud)
-		thickLine(img, cx-size/12, cy+size/10, cx+size/20, cy+size/4, ink, 4)
-		thickLine(img, cx+size/20, cy+size/4, cx-size/16, cy+size/3, ink, 4)
 	default:
 		drawCloud(img, cx, cy, size/2, cloud)
 	}

@@ -36,6 +36,8 @@ func (d *Display) handleSolarEdge(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/settings/solaredge.json":
 		d.handleSolarEdgeJSON(w, r, c)
+	case "/settings/solaredge/authorize":
+		d.handleSolarEdgeAuthorize(w, r, c)
 	case "/settings/solaredge/start":
 		d.handleSolarEdgeStart(w, r, c)
 	case "/settings/solaredge/callback":
@@ -55,11 +57,13 @@ func (d *Display) handleSolarEdgeJSON(w http.ResponseWriter, r *http.Request, c 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"configured":     st.Configured,
-			"authorized":     st.Authorized,
-			"site_id":        st.SiteID,
-			"redirect_uri":   solarRedirectURI(r),
-			"authorize_hint": "Add the redirect_uri below to your SolarEdge developer app, then Connect.",
+			"configured":   st.Configured,
+			"authorized":   st.Authorized,
+			"site_id":      st.SiteID,
+			"redirect_uri": solaredge.DefaultOAuthRedirectURI,
+			"authorize_hint": "Register " + solaredge.DefaultOAuthRedirectURI + " in the SolarEdge developer app. " +
+				"Click Connect (new tab) → approve. “Connection refused” on 127.0.0.1 is normal — " +
+				"leave that tab’s address bar visible, copy the whole URL, paste it below, Submit.",
 		})
 	case http.MethodPost, http.MethodPut:
 		if c == nil || !c.Configured() {
@@ -82,9 +86,10 @@ func (d *Display) handleSolarEdgeJSON(w http.ResponseWriter, r *http.Request, c 
 			}
 		}
 		if code := strings.TrimSpace(body.Code); code != "" {
+			code = extractAuthCode(code)
 			redir := strings.TrimSpace(body.RedirectURI)
 			if redir == "" {
-				redir = solarRedirectURI(r)
+				redir = solaredge.DefaultOAuthRedirectURI
 			}
 			if err := c.ExchangeCode(r.Context(), code, redir, body.SiteID); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -104,29 +109,67 @@ func (d *Display) handleSolarEdgeJSON(w http.ResponseWriter, r *http.Request, c 
 	}
 }
 
+func (d *Display) prepareSolarAuthorize(c *solaredge.OAuthClient) (authURL string, err error) {
+	if c == nil || !c.Configured() {
+		return "", errSolarNotConfigured
+	}
+	redir := solaredge.DefaultOAuthRedirectURI
+	state, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	authURL, err = c.AuthorizeURL(redir, state)
+	if err != nil {
+		return "", err
+	}
+	d.solarPendingMu.Lock()
+	d.solarPending = solarOAuthPending{state: state, redirectURI: redir, at: time.Now()}
+	d.solarPendingMu.Unlock()
+	return authURL, nil
+}
+
+var errSolarNotConfigured = errString("SolarEdge client id/secret not configured on this server")
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
+func (d *Display) handleSolarEdgeAuthorize(w http.ResponseWriter, r *http.Request, c *solaredge.OAuthClient) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	authURL, err := d.prepareSolarAuthorize(c)
+	if err != nil {
+		status := http.StatusBadRequest
+		if err == errSolarNotConfigured {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"authorize_url": authURL,
+		"redirect_uri":  solaredge.DefaultOAuthRedirectURI,
+	})
+}
+
 func (d *Display) handleSolarEdgeStart(w http.ResponseWriter, r *http.Request, c *solaredge.OAuthClient) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if c == nil || !c.Configured() {
-		http.Error(w, "SolarEdge client id/secret not configured on this server", http.StatusServiceUnavailable)
-		return
-	}
-	redir := solarRedirectURI(r)
-	state, err := randomHex(16)
+	authURL, err := d.prepareSolarAuthorize(c)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		status := http.StatusBadRequest
+		if err == errSolarNotConfigured {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
-	authURL, err := c.AuthorizeURL(redir, state)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	d.solarPendingMu.Lock()
-	d.solarPending = solarOAuthPending{state: state, redirectURI: redir, at: time.Now()}
-	d.solarPendingMu.Unlock()
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
@@ -170,7 +213,7 @@ func (d *Display) handleSolarEdgeCallback(w http.ResponseWriter, r *http.Request
 	}
 	redir := pending.redirectURI
 	if redir == "" {
-		redir = solarRedirectURI(r)
+		redir = solaredge.DefaultOAuthRedirectURI
 	}
 	site := strings.TrimSpace(q.Get("site_id"))
 	if err := c.ExchangeCode(r.Context(), code, redir, site); err != nil {
@@ -180,19 +223,33 @@ func (d *Display) handleSolarEdgeCallback(w http.ResponseWriter, r *http.Request
 	http.Redirect(w, r, "/settings?solaredge=ok", http.StatusFound)
 }
 
-func solarRedirectURI(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
+// extractAuthCode accepts a bare code or a full callback URL containing ?code=.
+func extractAuthCode(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
 	}
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
-		scheme = strings.TrimSpace(strings.Split(proto, ",")[0])
+	if !strings.Contains(raw, "://") && !strings.Contains(raw, "code=") {
+		return raw
 	}
-	host := r.Host
-	if host == "" {
-		host = "127.0.0.1:8080"
+	u, err := url.Parse(raw)
+	if err != nil {
+		if i := strings.Index(raw, "code="); i >= 0 {
+			rest := raw[i+5:]
+			if j := strings.IndexAny(rest, "&#"); j >= 0 {
+				rest = rest[:j]
+			}
+			if c, e := url.QueryUnescape(rest); e == nil {
+				return c
+			}
+			return rest
+		}
+		return raw
 	}
-	return scheme + "://" + host + "/settings/solaredge/callback"
+	if c := u.Query().Get("code"); c != "" {
+		return c
+	}
+	return raw
 }
 
 func randomHex(n int) (string, error) {

@@ -93,7 +93,7 @@ func drawIdleLandscape(img *image.Gray, idle Idle, pad, scale int) {
 		cx := x + colW/2
 		drawCenteredIn(img, dayFace, day.Label, x, colW, forecastTop+dayFace.Metrics().Ascent.Round(), 40)
 		isz := px(scale, 60)
-		drawWeatherIcon(img, day.Code, cx-isz/2, forecastTop+px(scale, 34), isz)
+		drawWeatherIcon(img, day.Code, cx-isz/2, forecastTop+px(scale, 34), isz, false, 0)
 		hy := forecastTop + px(scale, 128)
 		drawCenteredIn(img, hiFace, fmt.Sprintf("%d°", day.High), x, colW, hy+hiFace.Metrics().Ascent.Round(), 0)
 		drawCenteredIn(img, loFace, fmt.Sprintf("%d°", day.Low), x, colW, hy+hiFace.Metrics().Height.Round()+px(scale, 6)+loFace.Metrics().Ascent.Round(), 90)
@@ -139,7 +139,7 @@ func drawWeatherColumn(img *image.Gray, snap weather.Snapshot, x0, x1, y0, y1, s
 	if icon > colW*45/100 {
 		icon = colW * 45 / 100
 	}
-	drawWeatherIcon(img, snap.Code, x0, y, icon)
+	drawWeatherIcon(img, snap.Code, x0, y, icon, isNightAt(snap.Sunrise, snap.Sunset, time.Now()), snap.MoonFrac)
 	tx := x0 + icon + px(scale, 20)
 	tempStr := fmt.Sprintf("%d%s", snap.Temp, snap.Unit)
 	tempW := measure(tempFace, tempStr)
@@ -167,19 +167,14 @@ func drawWeatherColumn(img *image.Gray, snap weather.Snapshot, x0, x1, y0, y1, s
 		// Weather glyphs use ~size/3 radius; size the moon to 75% of that visual.
 		weatherGlyph := icon * 2 / 3
 		moon := weatherGlyph * 75 / 100
+		// Icon centered under the condition glyph; phase name centered under temp.
+		iconCX := x0 + icon/2
+		drawMoonIcon(img, iconCX-moon/2, y, moon, snap.MoonFrac)
 		nameW := measure(moonFace, snap.MoonName)
-		gap := moon/2 + 40
-		nameX := tempCX - nameW/2
-		moonX := nameX - gap - moon + 5
-		drawMoonRow(img, snap.MoonFrac, snap.MoonName, moonX, y, moon, moonFace)
+		nameY := y + moon/2 + moonFace.Metrics().Ascent.Round()/3
+		drawAt(img, moonFace, snap.MoonName, tempCX-nameW/2, nameY, 20)
 	}
 	_ = y1
-}
-
-func drawMoonRow(img *image.Gray, frac float64, name string, x, y, icon int, face font.Face) {
-	drawMoonIcon(img, x, y, icon, frac)
-	gap := icon/2 + 40
-	drawAt(img, face, name, x+icon+gap, y+icon/2+face.Metrics().Ascent.Round()/3, 20)
 }
 
 // drawMoonIcon paints a northern-hemisphere moon. frac 0=new, 0.5=full.

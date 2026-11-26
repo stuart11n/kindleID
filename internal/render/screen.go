@@ -68,6 +68,35 @@ func SoftRotateCCW(src *image.Gray) *image.Gray {
 	return dst
 }
 
+// SoftRotateCW is the inverse of SoftRotateCCW (portrait framebuffer → landscape).
+func SoftRotateCW(src *image.Gray) *image.Gray {
+	b := src.Bounds()
+	w, h := b.Dx(), b.Dy()
+	dst := image.NewGray(image.Rect(0, 0, h, w))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			dst.SetGray(h-1-y, x, src.GrayAt(b.Min.X+x, b.Min.Y+y))
+		}
+	}
+	return dst
+}
+
+// RotatePNGCW decodes a PNG, rotates it 90° clockwise, and re-encodes.
+func RotatePNGCW(pngBytes []byte) ([]byte, error) {
+	img, err := png.Decode(bytes.NewReader(pngBytes))
+	if err != nil {
+		return nil, err
+	}
+	return encode(SoftRotateCW(imageToGray(img)))
+}
+
+func imageToGray(src image.Image) *image.Gray {
+	b := src.Bounds()
+	dst := image.NewGray(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(dst, dst.Bounds(), src, b.Min, draw.Src)
+	return dst
+}
+
 func drawCard(width, height int, card Card) (*image.Gray, error) {
 	if width < 64 || height < 64 {
 		return nil, errSize

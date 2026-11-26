@@ -149,16 +149,20 @@ func main() {
 	}
 	solarSwitch := solaredge.NewSwitchable(mode, api, mb)
 	se := solaredge.Source(solarSwitch)
+	solarRefresh := server.MustDuration(v.SolarEvery, time.Hour)
+	if mode == solaredge.ModeModbus && solarRefresh < 15*time.Minute {
+		solarRefresh = 15 * time.Minute
+	}
 	switch solarSwitch.Mode() {
 	case solaredge.ModeModbus:
 		if mb.Enabled() {
-			log.Printf("solaredge modbus %s unit %d", mbAddr, mbUnit)
+			log.Printf("solaredge modbus %s unit %d every %s", mbAddr, mbUnit, solarRefresh)
 		} else {
 			log.Printf("solaredge modbus: set host in /settings")
 		}
 	default:
 		if api.Enabled() {
-			log.Printf("solaredge api site %s (oauth)", api.Status().SiteID)
+			log.Printf("solaredge api site %s (oauth) every %s", api.Status().SiteID, solarRefresh)
 		} else if api.Configured() {
 			log.Printf("solaredge api: authorize via /settings")
 		} else {
@@ -180,7 +184,7 @@ func main() {
 			SolarEdge:    se,
 			SolarSwitch:  solarSwitch,
 			Refresh:      server.MustDuration(v.WeatherEvery, 15*time.Minute),
-			SolarRefresh: server.MustDuration(v.SolarEvery, time.Hour),
+			SolarRefresh: solarRefresh,
 			Radar:        v.Radar,
 			Settings:     settings,
 			Detect: detect.Config{

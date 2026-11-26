@@ -38,7 +38,7 @@ while true; do
 		sleep 10
 		continue
 	fi
-	if wget -q -O "$STATE/version.new" "$base/version"; then
+	if wget -q -U KindleShazam/1 -O "$STATE/version.new" "$base/version"; then
 		fail=0
 		ver=$(sed -n '1p' "$STATE/version.new" | tr -d '[:space:]')
 		next=$(sed -n '2p' "$STATE/version.new" | tr -d '[:space:]')
@@ -67,7 +67,7 @@ while true; do
 				;;
 		esac
 		if [ -n "$ver" ] && [ "$ver" != "$last" ]; then
-			if wget -q -O "$STATE/screen.png" "$base/screen.png"; then
+			if wget -q -U KindleShazam/1 -O "$STATE/screen.png" "$base/screen.png"; then
 				n=$((n + 1))
 				if [ $((n % 10)) -eq 1 ]; then
 					"$FBINK" -g "file=$STATE/screen.png" -W GC16 -f

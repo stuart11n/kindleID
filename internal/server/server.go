@@ -7,9 +7,11 @@ import (
 	"image"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"kindle-shazam/internal/render"
 	"kindle-shazam/internal/solaredge"
 )
 
@@ -207,6 +209,7 @@ func (d *Display) Handler() http.Handler {
 	mux.HandleFunc("/settings.json", d.handleSettings)
 	mux.HandleFunc("/settings/restart", d.handleSettingsRestart)
 	mux.HandleFunc("/settings/solaredge.json", d.handleSolarEdge)
+	mux.HandleFunc("/settings/solaredge/authorize", d.handleSolarEdge)
 	mux.HandleFunc("/settings/solaredge/start", d.handleSolarEdge)
 	mux.HandleFunc("/settings/solaredge/callback", d.handleSolarEdge)
 	mux.HandleFunc("/kindle/stop", d.handleKindleStop)
@@ -237,6 +240,12 @@ func (d *Display) Handler() http.Handler {
 		if len(png) == 0 {
 			http.Error(w, "no screen yet", http.StatusServiceUnavailable)
 			return
+		}
+		// Stored PNG is soft-rotated CCW for FBInk. Browsers get CW so it reads upright.
+		if !isKindle(r.UserAgent()) {
+			if rotated, err := render.RotatePNGCW(png); err == nil {
+				png = rotated
+			}
 		}
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Cache-Control", "no-store")
@@ -283,4 +292,8 @@ func (d *Display) Handler() http.Handler {
 		})
 	})
 	return mux
+}
+
+func isKindle(ua string) bool {
+	return strings.Contains(ua, "KindleShazam") || strings.Contains(ua, "Wget")
 }

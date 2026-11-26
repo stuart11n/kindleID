@@ -140,9 +140,9 @@ const settingsHTML = `<!DOCTYPE html>
     background: #fff; font: inherit; color: inherit;
   }
   .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
-  button { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; font: inherit; cursor: pointer; }
-  button.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
-  button:disabled { opacity: 0.6; cursor: default; }
+  button, a.btn { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; font: inherit; cursor: pointer; text-decoration: none; display: inline-block; }
+  button.secondary, a.btn.secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  button:disabled, a.btn.disabled { opacity: 0.6; cursor: default; pointer-events: none; }
   .msg { min-height: 1.2em; color: var(--muted); }
   .msg.ok { color: #1b6b3a; }
   .msg.err { color: #8b1e1e; }
@@ -286,13 +286,13 @@ const settingsHTML = `<!DOCTYPE html>
     <fieldset>
       <legend>SolarEdge</legend>
       <div class="row">
-        <label>Source
+        <label>Source <span>Modbus is live but can upset some inverters — keep refresh ≥15m</span>
           <select name="solar_source" id="solar_source">
             <option value="api">Cloud API (OAuth)</option>
-            <option value="modbus">Modbus TCP (local inverter)</option>
+            <option value="modbus">Modbus TCP (local)</option>
           </select>
         </label>
-        <label>Refresh <span>API: free tier ~2000 credits/mo; no polls 9pm–6am</span>
+        <label>Refresh <span>API: free-tier credits, no polls 9pm–6am. Modbus forced ≥15m.</span>
           <select name="solar_every" id="solar_every">
             <option value="15m">15m</option>
             <option value="30m">30m</option>
@@ -312,16 +312,18 @@ const settingsHTML = `<!DOCTYPE html>
         </label>
       </div>
       <p class="sub" id="seStatus" style="margin:8px 0 4px">SolarEdge status…</p>
+      <p class="sub" id="seHint" style="margin:0 0 8px;font-size:0.85rem"></p>
       <p class="sub" id="seRedirect" style="margin:0 0 8px;word-break:break-all;font-size:0.8rem"></p>
       <div class="actions" style="margin-top:0">
-        <button type="button" class="secondary" id="seConnect">Connect SolarEdge</button>
+        <a class="btn secondary" id="seConnect" href="#" target="_blank" rel="noopener noreferrer">1. Connect SolarEdge (new tab)</a>
         <button type="button" class="secondary" id="seSaveSite">Save site ID</button>
       </div>
-      <label style="margin-top:8px">Paste auth code <span>if redirect URI is not registered yet</span>
-        <input type="text" name="se_code" id="se_code" placeholder="authorization code" autocomplete="off">
+      <p class="sub" style="margin:8px 0;font-size:0.85rem"><strong>“127.0.0.1 refused to connect” is expected.</strong> Do not close that tab — copy the full address-bar URL (it contains <code>code=</code>) and paste it below.</p>
+      <label style="margin-top:4px">2. Paste callback URL or code
+        <input type="text" name="se_code" id="se_code" placeholder="http://127.0.0.1:8765/callback?code=…" autocomplete="off">
       </label>
       <div class="actions">
-        <button type="button" class="secondary" id="seSubmitCode">Submit code</button>
+        <button type="button" class="secondary" id="seSubmitCode">3. Submit code</button>
       </div>
     </fieldset>
 
@@ -415,16 +417,29 @@ async function loadSolar() {
     const res = await fetch("/settings/solaredge.json", {cache:"no-store"});
     if (!res.ok) throw new Error(await res.text());
     const se = await res.json();
-    if (se.site_id && !se_site_id.value) se_site_id.value = se.site_id;
-    else if (se.site_id) se_site_id.value = se.site_id;
+    if (se.site_id) se_site_id.value = se.site_id;
     let line = "API: ";
     if (!se.configured) line += "client id/secret missing on server";
     else if (se.authorized) line += "authorized" + (se.site_id ? " (site " + se.site_id + ")" : "");
     else line += "not authorized — Connect below";
     seStatus.textContent = line;
+    seHint.textContent = se.authorize_hint || "";
     seRedirect.textContent = se.redirect_uri
-      ? "Register redirect URI: " + se.redirect_uri
+      ? "Developer portal redirect URI (exact): " + se.redirect_uri
       : "";
+    if (se.configured) {
+      const ar = await fetch("/settings/solaredge/authorize", {cache:"no-store"});
+      if (ar.ok) {
+        const a = await ar.json();
+        if (a.authorize_url) {
+          seConnect.href = a.authorize_url;
+          seConnect.classList.remove("disabled");
+        }
+      }
+    } else {
+      seConnect.href = "#";
+      seConnect.classList.add("disabled");
+    }
   } catch (err) {
     seStatus.textContent = "API status unavailable: " + (err.message || err);
   }
@@ -500,8 +515,36 @@ f.addEventListener("submit", async (e) => {
   }
 });
 
-seConnect.addEventListener("click", () => {
-  location.href = "/settings/solaredge/start";
+seConnect.addEventListener("click", (e) => {
+  if (!seConnect.href || seConnect.href.endsWith("#") || seConnect.classList.contains("disabled")) {
+    e.preventDefault();
+    msg.className = "msg err";
+    msg.textContent = "SolarEdge client id/secret not configured on the server.";
+    return;
+  }
+  // Fresh authorize URL each click (state/nonce).
+  e.preventDefault();
+  (async () => {
+    try {
+      const ar = await fetch("/settings/solaredge/authorize", {cache:"no-store"});
+      if (!ar.ok) throw new Error(await ar.text() || ar.statusText);
+      const a = await ar.json();
+      if (!a.authorize_url) throw new Error("no authorize_url");
+      seConnect.href = a.authorize_url;
+      const w = window.open(a.authorize_url, "_blank", "noopener,noreferrer");
+      msg.className = "msg";
+      if (!w) {
+        msg.textContent = "Popup blocked — use the Connect link (right-click → Open in new tab), or click Connect again after allowing popups.";
+        // Fall back: navigate via the anchor without prevent on next click.
+        seConnect.removeAttribute("data-needs-gesture");
+      } else {
+        msg.textContent = "Approve in the new tab. Connection refused on 127.0.0.1 is normal — copy that tab’s full URL and paste below.";
+      }
+    } catch (err) {
+      msg.className = "msg err";
+      msg.textContent = String(err.message || err);
+    }
+  })();
 });
 
 seSaveSite.addEventListener("click", async () => {

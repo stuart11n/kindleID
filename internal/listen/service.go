@@ -303,14 +303,19 @@ func Run(ctx context.Context, opts Options) error {
 			lv.width = v.Width
 			lv.height = v.Height
 			lv.refresh = server.MustDuration(v.WeatherEvery, 15*time.Minute)
-			lv.solarRefresh = server.MustDuration(v.SolarEvery, time.Hour)
+			solarEvery := server.MustDuration(v.SolarEvery, time.Hour)
+			mode := v.SolarSource
+			if mode == "" {
+				mode = solaredge.ModeAPI
+			}
+			// SolarEdge Modbus TCP is fragile — never poll faster than 15m.
+			if mode == solaredge.ModeModbus && solarEvery < 15*time.Minute {
+				solarEvery = 15 * time.Minute
+			}
+			lv.solarRefresh = solarEvery
 			lv.radar = v.Radar
 			lv.mu.Unlock()
 			if opts.SolarSwitch != nil {
-				mode := v.SolarSource
-				if mode == "" {
-					mode = solaredge.ModeAPI
-				}
 				opts.SolarSwitch.SetMode(mode)
 				if addr := strings.TrimSpace(v.SolarModbus); addr != "" {
 					unit := byte(v.SolarUnit)

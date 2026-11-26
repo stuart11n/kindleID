@@ -130,26 +130,38 @@ func (c *OAuthClient) Fetch(ctx context.Context) (Snapshot, error) {
 	var chargeW, dischargeW float64
 	_ = c.applyStorageTelemetry(ctx, token, site, &snap, &chargeW, &dischargeW)
 
-	var importW, exportW float64
-	if err := c.applyMeterTelemetry(ctx, token, site, &importW, &exportW); err == nil {
+	var importW, exportW, consumptionW float64
+	var haveConsumption bool
+	if err := c.applyMeterTelemetry(ctx, token, site, &importW, &exportW, &consumptionW, &haveConsumption); err == nil {
 		snap.HasMeter = true
-		if exportW >= importW && exportW > 1 {
-			snap.GridWatts = exportW
+		// 15‑min buckets often contain both import and export — show net flow.
+		net := exportW - importW
+		if net > 25 {
+			snap.GridWatts = net
 			snap.GridExport = true
+		} else if net < -25 {
+			snap.GridWatts = -net
+			snap.GridExport = false
 		} else {
-			snap.GridWatts = importW
+			snap.GridWatts = 0
 			snap.GridExport = false
 		}
 	}
 
-	// Do not invent PV from battery charge — /power is the production series.
-	// Load from metered import/export + reported PV/storage (15‑min averages).
+	// House load from power balance (matches SE power-flow math). The virtual
+	// CONSUMPTION meter's consumptionPower collapses near zero while charging
+	// and is not the live "Load" the SE app shows.
 	load := snap.PVWatts + importW - exportW - chargeW + dischargeW
 	if load < 0 {
 		load = 0
 	}
-	if snap.HasMeter || load > 0 {
+	if haveConsumption && consumptionW > load+100 && consumptionW > 50 {
+		// Prefer meter only when it's clearly more complete than the balance.
+		snap.LoadWatts = consumptionW
+	} else {
 		snap.LoadWatts = load
+	}
+	if snap.HasMeter || snap.LoadWatts > 0 {
 		snap.HasMeter = true
 	}
 
@@ -397,6 +409,7 @@ func (c *OAuthClient) applyStorageTelemetry(ctx context.Context, token, site str
 	if err := c.doJSON(ctx, http.MethodGet, "/sites/"+url.PathEscape(site)+"/storage/telemetry?"+q.Encode(), token, nil, &payload); err != nil {
 		return err
 	}
+	found := false
 	for _, b := range payload.Storage {
 		charge := lastTelemetry(b.ChargePower.Values)
 		discharge := lastTelemetry(b.DischargePower.Values)
@@ -404,6 +417,7 @@ func (c *OAuthClient) applyStorageTelemetry(ctx context.Context, token, site str
 		if charge == nil && discharge == nil && soe == nil {
 			continue
 		}
+		found = true
 		snap.HasBattery = true
 		var cW, dW float64
 		if charge != nil {
@@ -424,6 +438,9 @@ func (c *OAuthClient) applyStorageTelemetry(ctx context.Context, token, site str
 		} else if cW > 1 {
 			snap.BatteryWatts = cW
 			snap.BatteryCharging = true
+		} else {
+			snap.BatteryWatts = 0
+			snap.BatteryCharging = false
 		}
 		if soe != nil {
 			pct := *soe
@@ -434,12 +451,15 @@ func (c *OAuthClient) applyStorageTelemetry(ctx context.Context, token, site str
 			snap.BatteryPct = int(pct + 0.5)
 			snap.BatteryCritical = snap.BatteryPct > 0 && snap.BatteryPct < 10
 		}
-		return nil
+		break
+	}
+	if !found {
+		return fmt.Errorf("solaredge storage: no telemetry samples")
 	}
 	return nil
 }
 
-func (c *OAuthClient) applyMeterTelemetry(ctx context.Context, token, site string, importW, exportW *float64) error {
+func (c *OAuthClient) applyMeterTelemetry(ctx context.Context, token, site string, importW, exportW, consumptionW *float64, haveConsumption *bool) error {
 	now := time.Now()
 	q := url.Values{}
 	q.Set("from", now.Add(-6*time.Hour).Format(time.RFC3339))
@@ -452,23 +472,39 @@ func (c *OAuthClient) applyMeterTelemetry(ctx context.Context, token, site strin
 			ExportPower struct {
 				Values telemetryPoints `json:"values"`
 			} `json:"exportPower"`
+			ConsumptionPower struct {
+				Values telemetryPoints `json:"values"`
+			} `json:"consumptionPower"`
 		} `json:"meters"`
 	}
 	if err := c.doJSON(ctx, http.MethodGet, "/sites/"+url.PathEscape(site)+"/meters/telemetry?"+q.Encode(), token, nil, &payload); err != nil {
 		return err
 	}
+	// Physical meter (import/export) plus virtual CONSUMPTION meter — merge all keys.
+	var got bool
 	for _, m := range payload.Meters {
-		imp := lastTelemetry(m.ImportPower.Values)
-		exp := lastTelemetry(m.ExportPower.Values)
-		if importW != nil && imp != nil {
+		if imp := lastTelemetry(m.ImportPower.Values); imp != nil && importW != nil {
 			*importW = *imp
+			got = true
 		}
-		if exportW != nil && exp != nil {
+		if exp := lastTelemetry(m.ExportPower.Values); exp != nil && exportW != nil {
 			*exportW = *exp
+			got = true
 		}
-		return nil
+		if load := lastTelemetry(m.ConsumptionPower.Values); load != nil {
+			if consumptionW != nil {
+				*consumptionW = *load
+			}
+			if haveConsumption != nil {
+				*haveConsumption = true
+			}
+			got = true
+		}
 	}
-	return fmt.Errorf("solaredge: no meter telemetry")
+	if !got {
+		return fmt.Errorf("solaredge meters: no telemetry samples")
+	}
+	return nil
 }
 
 func absFloat(v float64) float64 {
